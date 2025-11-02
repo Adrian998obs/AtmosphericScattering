@@ -212,7 +212,7 @@ class Star:
         
     def createPhotonPackets(self, initial, N):
         energy_samples = self.sample_blackbody_E(self.T, N)
-        photons = [PhotonPacket(initial, energy_samples[i]) for i in range(N)]
+        photons = [PhotonPacket(initial[i], energy_samples[i]) for i in range(N)]
 
         return photons
 
@@ -223,9 +223,10 @@ class Simulation:
         self.star = star
         self.N = N
 
-        x, y, z = self.atmosphere.shape[0]/2, self.atmosphere.shape[1]/2, self.atmosphere.shape[2]-0.001
-        initial = np.array([x, y, z])
-
+        initial = np.array([np.random.uniform(0, self.atmosphere.shape[0], N),
+                            np.random.uniform(0, self.atmosphere.shape[1], N),
+                            (self.atmosphere.shape[2] - 0.001)*np.ones(N)]).T
+        
         self.photons = self.star.createPhotonPackets(initial,N)
 
     def run(self):
@@ -238,7 +239,7 @@ class Simulation:
                 photon.energy_loss()
                 photon.move()
 
-    def plot(self):
+    def plot(self, rays=False):
 
         norm = colors.Normalize(vmin=np.min(self.atmosphere.source_function), vmax=np.max(self.atmosphere.source_function))
         facecolors = cm.rainbow_r(norm(self.atmosphere.source_function))
@@ -246,13 +247,14 @@ class Simulation:
         plt.figure()
         ax = plt.axes(projection='3d')
         ax.voxels(self.atmosphere.source_function > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
-        for i in range(self.N):
-            ax.plot(
-                self.photons[i].trajectory[:,0],
-                self.photons[i].trajectory[:,1],
-                self.photons[i].trajectory[:,2],
-                color='r', linewidth=3, label='Ray Path'
-        )
+        if rays:
+            for i in range(self.N):
+                ax.plot(
+                    self.photons[i].trajectory[:,0],
+                    self.photons[i].trajectory[:,1],
+                    self.photons[i].trajectory[:,2],
+                    color='r', linewidth=3, label='Ray Path'
+            )
         ax.set_xlabel('X axis')
         ax.set_ylabel('Y axis')
         ax.set_zlabel('Z axis')
@@ -268,7 +270,7 @@ if __name__ == "__main__":
     T = 5800  # Temperature in Kelvin
     R = 696.340  # Radius in Mm
     D = 1.5e11  # Distance in meters
-    N = 1  # Number of photon packets
+    N = 10000  # Number of photon packets
     star = Star(T, R, D)
     atm = Atmosphere(boxsize)
     sim = Simulation(atm, star, N)
