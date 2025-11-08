@@ -4,7 +4,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 
 class Atmosphere:
-    def __init__(self, shape):
+    def __init__(self, shape = (10,10,10)):
         self.shape = shape
         self.source_function = np.zeros(shape)
         self.albedo = 1.0
@@ -66,7 +66,7 @@ class Atmosphere:
 
         return tDeltaX, tDeltaY, tDeltaZ
 
-    def compute_length_in_cells(self, initial_position, depth, direction):
+    def deposit_energy(self, photon, return_lengths=False):
         """
         Compute the length of the ray in each cell it traverses.
         position: (x, y, z) coordinates of the starting point
@@ -74,8 +74,13 @@ class Atmosphere:
         Returns: 3D array of lengths in each cell
         """
         length_in_cell = np.zeros(self.shape)
-        if not self.in_box(initial_position):
-            return length_in_cell
+
+        initial_position = photon.position
+        depth = photon.optical_depth
+        direction = photon.direction_in_cartesian(photon.theta, photon.phi)
+        if not self.in_box(initial_position + direction * depth):
+            depth = self.distance_to_boundary(initial_position, direction)
+        
         # Determine step directions
         stepX = 1 if direction[0] > 0 else -1
         stepY = 1 if direction[1] > 0 else -1
@@ -83,24 +88,18 @@ class Atmosphere:
 
         # Initial distances to the next planes
         tMaxX, tMaxY, tMaxZ = self.distance_to_planes(initial_position, direction)
-        t_curr = np.min([tMaxX, tMaxY, tMaxZ])
-        length_in_cell[np.floor(initial_position).astype(int)[0], np.floor(initial_position).astype(int)[1], np.floor(initial_position).astype(int)[2]] += t_curr
-
+        t_curr = 0
         # Parametric distances to cross a cell
         tDeltaX, tDeltaY, tDeltaZ = self.parametric_distance_in_cell(direction)
         # Current cell indices
         Xcell, Ycell, Zcell = np.floor(initial_position).astype(int)
 
         while self.in_box([Xcell, Ycell, Zcell]) and t_curr < depth: 
-            if tMaxX < tMaxY and tMaxX < tMaxZ:
-                t_next = tMaxX
-            elif tMaxY < tMaxX and tMaxY < tMaxZ:
-                t_next = tMaxY
-            else:
-                t_next = tMaxZ
-
-            delta = min(t_next, depth) - t_curr
+            t_next = min(tMaxX, tMaxY, tMaxZ) # distance to next boundary crossing (from initial position)
+            delta = min(t_next, depth) - t_curr # length traveled in this cell 
             length_in_cell[Xcell, Ycell, Zcell] += delta
+            self.source_function[Xcell, Ycell, Zcell] += delta * photon.energy * self.albedo / (4 * np.pi)
+            photon.energy_loss(delta)
 
             if t_next == tMaxX:
                 tMaxX += tDeltaX
@@ -113,25 +112,13 @@ class Atmosphere:
                 Zcell += stepZ
 
             t_curr = min(t_next, depth)
-        
-        return length_in_cell
 
-    def deposit_energy(self, photon):
-
-        initial_position = photon.position
-        depth = photon.optical_depth
-        direction = photon.direction_in_cartesian(photon.theta, photon.phi)
-        energy = photon.energy
-        if not self.in_box(initial_position + direction * depth):
-            depth = self.distance_to_boundary(initial_position, direction)
-
-        lengths = self.compute_length_in_cells(initial_position, depth, direction)
-
-        self.source_function += lengths * energy * self.albedo / (4 * np.pi)
+        if return_lengths:
+            return length_in_cell
 
 class PhotonPacket:
 
-    def __init__(self, position, energy):
+    def __init__(self, position = np.array([0,0,0]), energy = 1.0):
         self.position = position
         self.energy = energy
         self.trajectory = np.array([position])
@@ -170,9 +157,11 @@ class PhotonPacket:
         self.position = new_position
         self.trajectory = np.append(self.trajectory, [new_position], axis=0)
 
-    def energy_loss(self):
-        self.energy *= np.exp(-self.optical_depth)
-        
+    def energy_loss(self, tau=None):
+        if tau is None:
+            tau = self.optical_depth
+        self.energy *= np.exp(-tau)
+
     def get_random_walk(self):
 
         return self.optical_depth, self.theta, self.phi
@@ -236,8 +225,12 @@ class Simulation:
 
                 photon.random_walk()
                 self.atmosphere.deposit_energy(photon)
-                photon.energy_loss()
-                photon.move()
+                if self.atmosphere.in_box(photon.position + photon.direction_in_cartesian(photon.theta, photon.phi) * photon.optical_depth):
+                    photon.move()
+                else:
+                    tau = self.atmosphere.distance_to_boundary(photon.position, photon.direction_in_cartesian(photon.theta, photon.phi))
+                    photon.optical_depth = tau
+                    photon.move()
 
     def plot(self, rays=False):
 
