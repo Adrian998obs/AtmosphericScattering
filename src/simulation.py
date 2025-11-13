@@ -2,16 +2,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
+from astropy.constants import c, h
 
 class Atmosphere:
-    def __init__(self, shape = (10,10,10)):
-        self.shape = shape
-        self.source_function = np.zeros(shape)
-        self.albedo = 1.0
+    def __init__(self, shape = (10,10,10), cell_size=1.0):
+        self._shape = shape
+        self._source_function = np.zeros(shape)
+        self._albedo = 1.0 # only scattering
+        self._cell_sizes = cell_size 
 
-    def in_box(self, position):
-        return all(0 <= position[i] < self.shape[i] for i in range(3))
-    
+    def in_box(self, position, index=False):
+        if index:
+            return all(0 <= position[i] < self._shape[i] for i in range(3))
+        else:
+            return all(0 <= position[i] < self._shape[i] * self._cell_sizes for i in range(3))
+
     def distance_to_boundary(self, position, direction):
         """
         Calculate the distance to the boundary of the 3D grid from a given position in a given direction.
@@ -22,7 +27,7 @@ class Atmosphere:
         distances = []
         for i in range(3):
             if direction[i] > 0:
-                boundary = self.shape[i]
+                boundary = self._shape[i] * self._cell_sizes
                 distance = (boundary - position[i]) / direction[i]
             elif direction[i] < 0:
                 boundary = 0
@@ -33,18 +38,21 @@ class Atmosphere:
         return min(distances)
     
     def distance_to_planes(self, position, direction):
-        """
-        Calculate the parametric distances to the next planes in a 3D grid.
-        position: (x, y, z) coordinates of the starting point
-        direction: (dx, dy, dz) direction vector
-        Returns: (tMaxX, tMaxY, tMaxZ) parametric distances to the next planes
-        """
-        
         x, y, z = position
-        # Determine the next face coordinates based on direction
-        faceX = np.floor(x) + 1 if direction[0] > 0 else np.floor(x)
-        faceY = np.floor(y) + 1 if direction[1] > 0 else np.floor(y)
-        faceZ = np.floor(z) + 1 if direction[2] > 0 else np.floor(z)
+
+        # Pour chaque axe, calcule la prochaine face physique
+        if direction[0] > 0:
+            faceX = (np.floor(x / self._cell_sizes) + 1) * self._cell_sizes
+        else:
+            faceX = (np.floor(x / self._cell_sizes) * self._cell_sizes)
+        if direction[1] > 0:
+            faceY = (np.floor(y / self._cell_sizes) + 1) * self._cell_sizes
+        else:
+            faceY = (np.floor(y / self._cell_sizes)) * self._cell_sizes
+        if direction[2] > 0:
+            faceZ = (np.floor(z / self._cell_sizes) + 1) * self._cell_sizes
+        else:
+            faceZ = (np.floor(z / self._cell_sizes)) * self._cell_sizes
 
         tMaxX = (faceX - x) / direction[0] if direction[0] != 0 else float('inf')
         tMaxY = (faceY - y) / direction[1] if direction[1] != 0 else float('inf')
@@ -52,34 +60,34 @@ class Atmosphere:
 
         return tMaxX, tMaxY, tMaxZ
 
-    def parametric_distance_in_cell(self, direction, cell_sizes=(1,1,1)):
+    def parametric_distance_in_cell(self, direction):
         """
         Calculate the parametric distances to the cell boundaries.
         direction: (dx, dy, dz) direction vector
-        cell_sizes: (sx, sy, sz) sizes of the cells in each dimension
         Returns: (tDeltaX, tDeltaY, tDeltaZ) parametric distances to the cell boundaries
         """
 
-        tDeltaX = cell_sizes[0] / abs(direction[0]) if direction[0] != 0 else float('inf')
-        tDeltaY = cell_sizes[1] / abs(direction[1]) if direction[1] != 0 else float('inf')
-        tDeltaZ = cell_sizes[2] / abs(direction[2]) if direction[2] != 0 else float('inf')
+        tDeltaX = self._cell_sizes / abs(direction[0]) if direction[0] != 0 else float('inf')
+        tDeltaY = self._cell_sizes / abs(direction[1]) if direction[1] != 0 else float('inf')
+        tDeltaZ = self._cell_sizes / abs(direction[2]) if direction[2] != 0 else float('inf')
 
         return tDeltaX, tDeltaY, tDeltaZ
 
-    def deposit_energy(self, photon, return_lengths=False):
+    def deposit_luminosity(self, photon, return_lengths=False):
         """
         Compute the length of the ray in each cell it traverses.
         position: (x, y, z) coordinates of the starting point
         direction: (dx, dy, dz) direction vector
         Returns: 3D array of lengths in each cell
         """
-        length_in_cell = np.zeros(self.shape)
+        length_in_cell = np.zeros(self._shape)
 
-        initial_position = photon.position
-        depth = photon.optical_depth
-        direction = photon.direction_in_cartesian(photon.theta, photon.phi)
-        if not self.in_box(initial_position + direction * depth):
-            depth = self.distance_to_boundary(initial_position, direction)
+        initial_position = photon.position()
+        depth, theta, phi = photon.get_random_walk()
+        length = photon.optical_length()
+        direction = photon.direction_in_cartesian(theta, phi)
+        if not self.in_box(initial_position + direction * length):
+            length = self.distance_to_boundary(initial_position, direction)
         
         # Determine step directions
         stepX = 1 if direction[0] > 0 else -1
@@ -92,14 +100,14 @@ class Atmosphere:
         # Parametric distances to cross a cell
         tDeltaX, tDeltaY, tDeltaZ = self.parametric_distance_in_cell(direction)
         # Current cell indices
-        Xcell, Ycell, Zcell = np.floor(initial_position).astype(int)
-
-        while self.in_box([Xcell, Ycell, Zcell]) and t_curr < depth: 
+        Xcell, Ycell, Zcell = np.floor(initial_position/self._cell_sizes).astype(int)
+        print(Xcell, Ycell, Zcell)
+        while self.in_box([Xcell, Ycell, Zcell], index=True) and t_curr < length: 
             t_next = min(tMaxX, tMaxY, tMaxZ) # distance to next boundary crossing (from initial position)
-            delta = min(t_next, depth) - t_curr # length traveled in this cell 
+            delta = min(t_next, length) - t_curr # length traveled in this cell 
             length_in_cell[Xcell, Ycell, Zcell] += delta
-            self.source_function[Xcell, Ycell, Zcell] += delta * photon.energy * self.albedo / (4 * np.pi)
-            photon.energy_loss(delta)
+            self._source_function[Xcell, Ycell, Zcell] += delta * photon.luminosity() * self._albedo / (4 * np.pi * self._cell_sizes ** 3)
+            photon.luminosity_loss(delta)
 
             if t_next == tMaxX:
                 tMaxX += tDeltaX
@@ -110,22 +118,39 @@ class Atmosphere:
             else:
                 tMaxZ += tDeltaZ
                 Zcell += stepZ
-
-            t_curr = min(t_next, depth)
+            #position = initial_position + direction * t_curr
+            #Xcell, Ycell, Zcell = np.floor(position / self._cell_sizes).astype(int)
+            print(Xcell, Ycell, Zcell)
+            t_curr = min(t_next, length)
 
         if return_lengths:
             return length_in_cell
+        
+    def cell_size(self):
+        return self._cell_sizes
+    def source_function(self):
+        return self._source_function
+    def shape(self):
+        return self._shape
 
 class PhotonPacket:
 
-    def __init__(self, position = np.array([0,0,0]), energy = 1.0):
-        self.position = position
-        self.energy = energy
-        self.trajectory = np.array([position])
-        self.energy_threshold = 1e-30
-        self.optical_depth = 0
-        self.theta = 0
-        self.phi = 0
+    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 2.5e25, initial_theta=None, initial_phi=None):
+        self._position = position
+        self._lambda = wavelength  # in meters
+        self._luminosity = luminosity  # in Watts
+        self._trajectory = np.array([position])
+        self._cross_section = 4.3e-56 / (self._lambda **4)  # Rayleigh scattering cross-section
+        self._scattering_coefficient = self._cross_section * number_density
+        self._luminosity_threshold = 1e-30
+        self._optical_depth = 0
+        self._optical_length = self._optical_depth / self._scattering_coefficient
+        self._theta = 0
+        self._phi = 0
+        
+        self._first_step = True
+        self._initial_theta = initial_theta
+        self._initial_phi = initial_phi
 
     def direction_in_cartesian(self, theta, phi):
         dx = np.sin(theta) * np.cos(phi)
@@ -134,38 +159,66 @@ class PhotonPacket:
         return np.array([dx, dy, dz])
     
     def maximum_optical_depth(self):
-        return -np.log(self.energy_threshold / self.energy)
+        return -np.log(self._luminosity_threshold / self._luminosity)
     
-    
-    def random_walk(self, return_all=False):
+    def random_walk(self):
         random_optical_depth = -np.log(np.random.random())
         optical_depth = min(random_optical_depth, self.maximum_optical_depth())
-        phi = 2 * np.pi * np.random.random()
-        theta = np.arccos(2 * np.random.random() - 1)
+        if self._first_step and self._initial_theta is not None and self._initial_phi is not None:
+            theta = self._initial_theta
+            phi = self._initial_phi
+            self._first_step = False
+        else:
+            phi = 2 * np.pi * np.random.random()
+            theta = np.arccos(2 * np.random.random() - 1)
 
-        self.optical_depth = optical_depth 
-        self.theta = theta 
-        self.phi = phi
-
-        if return_all:
-            return optical_depth, theta, phi
+        self._optical_depth = optical_depth
+        self._optical_length = optical_depth / self._scattering_coefficient
+        self._theta = theta
+        self._phi = phi
 
     def move(self):
 
-        direction = self.direction_in_cartesian(self.theta, self.phi)
-        new_position = self.position + self.optical_depth * direction
-        self.position = new_position
-        self.trajectory = np.append(self.trajectory, [new_position], axis=0)
+        direction = self.direction_in_cartesian(self._theta, self._phi)
+        new_position = self._position + self._optical_length * direction
+        self._position = new_position
+        self._trajectory = np.append(self._trajectory, [new_position], axis=0)
 
-    def energy_loss(self, tau=None):
-        if tau is None:
-            tau = self.optical_depth
-        self.energy *= np.exp(-tau)
+    def set_optical_length(self, length):
+        self._optical_length = length
+        self._optical_depth = length * self._scattering_coefficient
+
+    def luminosity_loss(self, s=None):
+        if s is None:
+            s = self._optical_length
+        self._luminosity *= np.exp(-self._scattering_coefficient * s)
 
     def get_random_walk(self):
 
-        return self.optical_depth, self.theta, self.phi
+        return self._optical_depth, self._theta, self._phi
+    
+    def optical_length(self):
 
+        return self._optical_length
+    def optical_depth(self):
+        return self._optical_depth
+    
+    def position(self):
+        return self._position
+    
+    def trajectory(self):
+        return self._trajectory
+    
+    def luminosity(self):
+        return self._luminosity
+
+    def luminosity_threshold(self):
+        return self._luminosity_threshold
+
+    def scattering_coefficient(self):
+        return self._scattering_coefficient
+    def wavelength(self):
+        return self._lambda
 
 class Star:
     def __init__(self, T, R, D):
@@ -199,76 +252,95 @@ class Star:
         
         return E
         
-    def createPhotonPackets(self, initial, N):
+    def createPhotonPackets(self, initial, N, initial_direction=None):
         energy_samples = self.sample_blackbody_E(self.T, N)
-        photons = [PhotonPacket(initial[i], energy_samples[i]) for i in range(N)]
+        photons = []
+        for i in range(N):
+            theta, phi = None, None
+            if initial_direction is not None:
+                theta, phi = initial_direction
+            print(f"Creating photon {i+1}/{N} at position {initial[i]} with luminosity {energy_samples[i]:.4e} J and direction (theta={theta}, phi={phi})")
+            photon = PhotonPacket(position = initial[i], luminosity=1/N, initial_theta=theta, initial_phi=phi)
+            photons.append(photon)
 
         return photons
 
 class Simulation:
-    def __init__(self, atmosphere, star, N=10):
-        
+    def __init__(self, atmosphere, star, N=10, initial_direction=None):
         self.atmosphere = atmosphere
         self.star = star
         self.N = N
-
-        initial = np.array([np.random.uniform(0, self.atmosphere.shape[0], N),
-                            np.random.uniform(0, self.atmosphere.shape[1], N),
-                            (self.atmosphere.shape[2] - 0.001)*np.ones(N)]).T
-        
-        self.photons = self.star.createPhotonPackets(initial,N)
+        initial = np.array([np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N),
+                            np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N),
+                            (self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)*np.ones(N)]).T
+        self.photons = self.star.createPhotonPackets(initial, N, initial_direction=initial_direction)
 
     def run(self):
         
         for photon in self.photons:
-            while photon.energy > photon.energy_threshold and self.atmosphere.in_box(photon.position):
-
+            while photon.luminosity() > photon.luminosity_threshold() and self.atmosphere.in_box(photon.position()):
+                print("Check")
                 photon.random_walk()
-                self.atmosphere.deposit_energy(photon)
-                if self.atmosphere.in_box(photon.position + photon.direction_in_cartesian(photon.theta, photon.phi) * photon.optical_depth):
+                tau, theta, phi = photon.get_random_walk()
+                
+                length = photon.optical_length()
+                print(f"Optical depth: {tau}, length: {length}, Theta: {theta*180/np.pi}, Phi: {phi*180/np.pi}")
+                self.atmosphere.deposit_luminosity(photon)
+                if self.atmosphere.in_box(photon.position() + photon.direction_in_cartesian(theta, phi) * length):
                     photon.move()
                 else:
-                    tau = self.atmosphere.distance_to_boundary(photon.position, photon.direction_in_cartesian(photon.theta, photon.phi))
-                    photon.optical_depth = tau
+                    L = self.atmosphere.distance_to_boundary(photon.position(), photon.direction_in_cartesian(theta, phi))
+                    photon.set_optical_length(L)
                     photon.move()
+                    break
 
     def plot(self, rays=False):
 
-        norm = colors.Normalize(vmin=np.min(self.atmosphere.source_function), vmax=np.max(self.atmosphere.source_function))
-        facecolors = cm.rainbow_r(norm(self.atmosphere.source_function))
+        norm = colors.Normalize(vmin=np.min(self.atmosphere.source_function()), vmax=np.max(self.atmosphere.source_function()))
+        facecolors = cm.rainbow_r(norm(self.atmosphere.source_function()))
+        nx, ny, nz = self.atmosphere.shape()
+        cell_size = self.atmosphere.cell_size()
 
+        x = np.arange(0, (nx + 1) * cell_size, cell_size)
+        y = np.arange(0, (ny + 1) * cell_size, cell_size)
+        z = np.arange(0, (nz + 1) * cell_size, cell_size)
+
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
         plt.figure()
         ax = plt.axes(projection='3d')
-        ax.voxels(self.atmosphere.source_function > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
+        ax.voxels(X, Y, Z, self.atmosphere.source_function() > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
         if rays:
             for i in range(self.N):
                 ax.plot(
-                    self.photons[i].trajectory[:,0],
-                    self.photons[i].trajectory[:,1],
-                    self.photons[i].trajectory[:,2],
+                    self.photons[i].trajectory()[:,0],
+                    self.photons[i].trajectory()[:,1],
+                    self.photons[i].trajectory()[:,2],
                     color='r', linewidth=3, label='Ray Path'
             )
         ax.set_xlabel('X axis')
         ax.set_ylabel('Y axis')
         ax.set_zlabel('Z axis')
-        ax.set_xlim(0, boxsize[0])
-        ax.set_ylim(0, boxsize[1])
-        ax.set_zlim(0, boxsize[2])
+        ax.set_xlim(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size())
+        ax.set_ylim(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size())
+        ax.set_zlim(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size())
         plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Intensity')
-        plt.savefig('../figures/simulation_output.png')
+        plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/simulation_output.png')
         plt.show()
 
 if __name__ == "__main__":
     boxsize = (10, 10, 10)
-    T = 5800  # Temperature in Kelvin
-    R = 696.340  # Radius in Mm
-    D = 1.5e11  # Distance in meters
-    N = 10000  # Number of photon packets
+    cell_size = 1e4
+    T = 5800
+    R = 696.340
+    D = 1.5e11
+    N = 1
     star = Star(T, R, D)
-    atm = Atmosphere(boxsize)
-    sim = Simulation(atm, star, N)
+    atm = Atmosphere(shape = boxsize, cell_size=cell_size)
+    # Par exemple, direction verticale
+    initial_direction = (np.pi, 0)  # theta=, phi=0
+    sim = Simulation(atm, star, N, initial_direction=initial_direction)
     sim.run()
-    sim.plot()
+    sim.plot(rays=True)
 
 
 
