@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
-from astropy.constants import c, h
+from astropy.constants import c, h, k
 
 class Atmosphere:
     def __init__(self, shape = (10,10,10), cell_size=1.0):
@@ -227,42 +227,63 @@ class Star:
         self.D = D
         
 
-    def bb_shape(self, x):
-    # Stable near x=0: use series x^2 when x is tiny
-        x = np.asarray(x)
-        out = np.empty_like(x, dtype=float)
+    def bb_shape_energy_pdf(self, x):
+        """
+        Energy PDF shape in x = h*nu/(kB*T):  f(x) ∝ x^3 / (exp(x) - 1)
+        Stable near x=0 by using the series limit.
+        """
+        x = np.asarray(x, dtype=float)
+        out = np.empty_like(x)
         small = x < 1e-6
-        out[small] = x[small]**2                     # limit as x->0
+        out[small]  = x[small]**2
         out[~small] = x[~small]**3 / (np.exp(x[~small]) - 1.0)
-        return out
+        return out  # unnormalized, fine for rejection
     
-    def sample_blackbody_E(self, T, N, x_max=20.0, y_max=1.5):
-    # simple rejection sampling; vectorized in batches for speed
-        k_B = 1.380649e-23  # J/K
-        samples = []
-        batch = max(1000, int(N/5))
-        while len(samples) < N:
+    def sample_blackbody_x(self, T, N, x_max=20.0, y_max=1.6):
+        """
+        Rejection sample x ~ energy PDF. Returns N samples of x.
+        NOTE: we track the *number accepted*, not the number of batches.
+        """
+        kept = []
+        total = 0
+        batch = max(1000, N // 5)
+        while total < N:
             x = np.random.uniform(0.0, x_max, size=batch)
             y = np.random.uniform(0.0, y_max, size=batch)
-            f = self.bb_shape(x)
-            keep = x[y < f]
-            samples.append(keep)
-        x_samples = np.concatenate(samples)[:N]
-        E = x_samples * k_B * T
+            f = self.bb_shape_energy_pdf(x)
+            accept = x[y < f]
+            if accept.size:
+                take = min(N - total, accept.size)
+                kept.append(accept[:take])
+                total += take
+        return np.concatenate(kept, axis=0)
         
-        return E
-        
-    def createPhotonPackets(self, initial, N, initial_direction=None):
-        energy_samples = self.sample_blackbody_E(self.T, N)
+    def createPhotonPackets(self, initial, N, use_physical_units=False, area=1.0, dt=1.0):
+        """
+        Option A: equal-energy packets.
+        - We sample *color* (x, hence lambda) from the energy PDF.
+        - We give every packet the same weight (energy).
+        """
+        h = h.value
+        c = c.value
+        kB = k.value
+
+        x_samples = self.sample_blackbody_x(self.T, N)
+        x_samples = np.clip(x_samples, 1e-9, None)
+        lam_samples = (h*c) / (kB*self.T * x_samples)  # store if you need lambda-dependent opacities
+    
+        if use_physical_units:
+            # You can later replace this with: weight = (∫F_lambda dλ * area * dt)/N
+            weight = 1.0 / N
+        else:
+            weight = 1.0  # relative units: every packet identical
+    
         photons = []
         for i in range(N):
-            theta, phi = None, None
-            if initial_direction is not None:
-                theta, phi = initial_direction
-            print(f"Creating photon {i+1}/{N} at position {initial[i]} with luminosity {energy_samples[i]:.4e} J and direction (theta={theta}, phi={phi})")
-            photon = PhotonPacket(position = initial[i], luminosity=1/N, initial_theta=theta, initial_phi=phi)
-            photons.append(photon)
-
+            p = PhotonPacket(initial, weight)
+            # Optional: keep color for later physics
+            p.lambda_m = float(lam_samples[i])
+            photons.append(p)
         return photons
 
 class Simulation:
