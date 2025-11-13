@@ -494,7 +494,7 @@ class Simulation:
         ax.set_ylim(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size())
         ax.set_zlim(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size())
         plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Intensity')
-        plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/simulation_output.png')
+        #plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/simulation_output.png')
         plt.show()
 
     def observe(self):
