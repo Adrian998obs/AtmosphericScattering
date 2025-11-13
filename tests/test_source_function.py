@@ -10,25 +10,25 @@ import simulation
 def test_length_ray():
     """Test the computation of lengths in atmosphere cells for a vertical ray."""
     # Create a simple atmosphere
-    atmosphere = simulation.Atmosphere(cell_size=2)
+    atmosphere = simulation.Atmosphere(shape=(10, 10, 10), cell_size=2)
     # Create a photon packet
-    photon = simulation.PhotonPacket()
+    photon = simulation.PhotonPacket(position=np.array([0, 0, 0]))
     
     # Vertical ray
-    photon._optical_depth = 100
+    photon.set_optical_length(100)
     photon._theta = 0
     photon._phi = 0
-    
-    lengths = atmosphere.deposit_energy(photon, return_lengths=True)
-    expected_length = atmosphere.cell_size() * atmosphere.shape[0]
+
+    lengths = atmosphere.deposit_luminosity(photon, return_lengths=True)
+    expected_length = atmosphere.cell_size() * atmosphere.shape()[0]
     assert np.sum(lengths) == expected_length, f"Sum of lengths in cells should equal the photon's optical depth, got {np.sum(lengths)} instead of {expected_length}"
 
     # Diagonal ray
     photon._position = np.array([0, 0, 0])
     photon._theta = np.pi / 4
     photon._phi = np.pi / 4
-    lengths = atmosphere.deposit_energy(photon, return_lengths=True)
-    expected_length = np.sqrt(2) * atmosphere.cell_size() * atmosphere.shape[0]
+    lengths = atmosphere.deposit_luminosity(photon, return_lengths=True)
+    expected_length = np.sqrt(2) * atmosphere.cell_size() * atmosphere.shape()[0]
     assert np.abs(np.sum(lengths) - expected_length) < 1e-6, f"Sum of lengths in cells should equal the photon's optical depth for diagonal ray, got {np.sum(lengths)} instead of {expected_length}"
 
 def test_plot_atmosphere():
@@ -38,9 +38,9 @@ def test_plot_atmosphere():
     photon._theta = 0.9553166181245092  # ~54.7356 degrees
     photon._phi = np.pi / 4
     dir = photon.direction_in_cartesian(photon._theta, photon._phi)
-    photon._optical_length = atmosphere.distance_to_boundary(photon._position, dir)
+    photon._optical_length = atmosphere.distance_to_boundary(photon.position(), dir)
 
-    lengths = atmosphere.deposit_energy(photon, return_lengths=True)
+    lengths = atmosphere.deposit_luminosity(photon, return_lengths=True)
     photon.move()
 
     from matplotlib import cm, colors
@@ -66,7 +66,7 @@ def test_plot_atmosphere():
         photon.trajectory()[:, 2],
         color='r', linewidth=3, label='Ray Path'
     )
-    Lx, Ly, Lz = np.array(atmosphere.shape) * cell_size
+    Lx, Ly, Lz = np.array(atmosphere.shape()) * cell_size
     ax.set_xlim(0, Lx)
     ax.set_ylim(0, Ly)
     ax.set_zlim(0, Lz)
@@ -91,7 +91,7 @@ def test_plot_sourceFunction():
     dir = photon.direction_in_cartesian(photon._theta, photon._phi)
     photon._optical_length = np.min([atmosphere.distance_to_boundary(photon.position(), dir), photon.maximum_optical_depth()/photon._scattering_coefficient])
     print("Distance to boundary :",atmosphere.distance_to_boundary(photon.position(), dir), " maximal ", photon.maximum_optical_depth(), "optical length:", photon._optical_length)
-    atmosphere.deposit_energy(photon)
+    atmosphere.deposit_luminosity(photon)
     photon.move()
     source_function = atmosphere.source_function()
     print(source_function[source_function>0])
@@ -120,9 +120,9 @@ def test_plot_sourceFunction():
     ax.set_xlabel('X axis')
     ax.set_ylabel('Y axis')
     ax.set_zlabel('Z axis')
-    ax.set_xlim(0, atmosphere.shape[0] * atmosphere._cell_sizes)
-    ax.set_ylim(0, atmosphere.shape[1] * atmosphere._cell_sizes)
-    ax.set_zlim(0, atmosphere.shape[2] * atmosphere._cell_sizes)
+    ax.set_xlim(0, atmosphere.shape()[0] * atmosphere.cell_size())
+    ax.set_ylim(0, atmosphere.shape()[1] * atmosphere.cell_size())
+    ax.set_zlim(0, atmosphere.shape()[2] * atmosphere.cell_size())
     plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='intensity')
     plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/test_plot_sourceFunction.png')
     plt.show()

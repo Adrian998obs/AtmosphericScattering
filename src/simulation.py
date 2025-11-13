@@ -2,20 +2,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
-from astropy.constants import c, h, k
+from astropy.constants import c, h, k_B
 
 class Atmosphere:
     def __init__(self, shape = (10,10,10), cell_size=1.0):
         self._shape = shape
         self._source_function = np.zeros(shape)
         self._albedo = 1.0 # only scattering
-        self._cell_sizes = cell_size 
+        self._cell_size = cell_size 
 
     def in_box(self, position, index=False):
         if index:
             return all(0 <= position[i] < self._shape[i] for i in range(3))
         else:
-            return all(0 <= position[i] < self._shape[i] * self._cell_sizes for i in range(3))
+            return all(0 <= position[i] < self._shape[i] * self._cell_size for i in range(3))
 
     def distance_to_boundary(self, position, direction):
         """
@@ -27,7 +27,7 @@ class Atmosphere:
         distances = []
         for i in range(3):
             if direction[i] > 0:
-                boundary = self._shape[i] * self._cell_sizes
+                boundary = self._shape[i] * self._cell_size
                 distance = (boundary - position[i]) / direction[i]
             elif direction[i] < 0:
                 boundary = 0
@@ -42,17 +42,17 @@ class Atmosphere:
 
         # Pour chaque axe, calcule la prochaine face physique
         if direction[0] > 0:
-            faceX = (np.floor(x / self._cell_sizes) + 1) * self._cell_sizes
+            faceX = (np.floor(x / self._cell_size) + 1) * self._cell_size
         else:
-            faceX = (np.floor(x / self._cell_sizes) * self._cell_sizes)
+            faceX = (np.floor(x / self._cell_size) * self._cell_size)
         if direction[1] > 0:
-            faceY = (np.floor(y / self._cell_sizes) + 1) * self._cell_sizes
+            faceY = (np.floor(y / self._cell_size) + 1) * self._cell_size
         else:
-            faceY = (np.floor(y / self._cell_sizes)) * self._cell_sizes
+            faceY = (np.floor(y / self._cell_size)) * self._cell_size
         if direction[2] > 0:
-            faceZ = (np.floor(z / self._cell_sizes) + 1) * self._cell_sizes
+            faceZ = (np.floor(z / self._cell_size) + 1) * self._cell_size
         else:
-            faceZ = (np.floor(z / self._cell_sizes)) * self._cell_sizes
+            faceZ = (np.floor(z / self._cell_size)) * self._cell_size
 
         tMaxX = (faceX - x) / direction[0] if direction[0] != 0 else float('inf')
         tMaxY = (faceY - y) / direction[1] if direction[1] != 0 else float('inf')
@@ -67,9 +67,9 @@ class Atmosphere:
         Returns: (tDeltaX, tDeltaY, tDeltaZ) parametric distances to the cell boundaries
         """
 
-        tDeltaX = self._cell_sizes / abs(direction[0]) if direction[0] != 0 else float('inf')
-        tDeltaY = self._cell_sizes / abs(direction[1]) if direction[1] != 0 else float('inf')
-        tDeltaZ = self._cell_sizes / abs(direction[2]) if direction[2] != 0 else float('inf')
+        tDeltaX = self._cell_size / abs(direction[0]) if direction[0] != 0 else float('inf')
+        tDeltaY = self._cell_size / abs(direction[1]) if direction[1] != 0 else float('inf')
+        tDeltaZ = self._cell_size / abs(direction[2]) if direction[2] != 0 else float('inf')
 
         return tDeltaX, tDeltaY, tDeltaZ
 
@@ -100,13 +100,13 @@ class Atmosphere:
         # Parametric distances to cross a cell
         tDeltaX, tDeltaY, tDeltaZ = self.parametric_distance_in_cell(direction)
         # Current cell indices
-        Xcell, Ycell, Zcell = np.floor(initial_position/self._cell_sizes).astype(int)
+        Xcell, Ycell, Zcell = np.floor(initial_position/self._cell_size).astype(int)
         print(Xcell, Ycell, Zcell)
         while self.in_box([Xcell, Ycell, Zcell], index=True) and t_curr < length: 
             t_next = min(tMaxX, tMaxY, tMaxZ) # distance to next boundary crossing (from initial position)
             delta = min(t_next, length) - t_curr # length traveled in this cell 
             length_in_cell[Xcell, Ycell, Zcell] += delta
-            self._source_function[Xcell, Ycell, Zcell] += delta * photon.luminosity() * self._albedo / (4 * np.pi * self._cell_sizes ** 3)
+            self._source_function[Xcell, Ycell, Zcell] += delta * photon.luminosity() * self._albedo / (4 * np.pi * self._cell_size ** 3)
             photon.luminosity_loss(delta)
 
             if t_next == tMaxX:
@@ -119,15 +119,57 @@ class Atmosphere:
                 tMaxZ += tDeltaZ
                 Zcell += stepZ
             #position = initial_position + direction * t_curr
-            #Xcell, Ycell, Zcell = np.floor(position / self._cell_sizes).astype(int)
+            #Xcell, Ycell, Zcell = np.floor(position / self._cell_size).astype(int)
             print(Xcell, Ycell, Zcell)
             t_curr = min(t_next, length)
 
         if return_lengths:
             return length_in_cell
-        
+    
+    def compute_length_in_cells(self, initial_position, depth, direction):
+        """
+        Compute the length of the ray in each cell it traverses.
+        initial_position: (x, y, z) coordinates of the starting point
+        depth: distance to propagate
+        direction: (dx, dy, dz) direction vector
+        Returns: 3D array of lengths in each cell
+        """
+        length_in_cell = np.zeros(self._shape)
+
+        # Step directions
+        stepX = 1 if direction[0] > 0 else -1
+        stepY = 1 if direction[1] > 0 else -1
+        stepZ = 1 if direction[2] > 0 else -1
+
+        # Initial distances to the next planes
+        tMaxX, tMaxY, tMaxZ = self.distance_to_planes(initial_position, direction)
+        t_curr = 0
+        # Parametric distances to cross a cell
+        tDeltaX, tDeltaY, tDeltaZ = self.parametric_distance_in_cell(direction)
+        # Current cell indices
+        Xcell, Ycell, Zcell = np.floor(initial_position/self._cell_size).astype(int)
+
+        while self.in_box([Xcell, Ycell, Zcell], index=True) and t_curr < depth: 
+            t_next = min(tMaxX, tMaxY, tMaxZ)
+            delta = min(t_next, depth) - t_curr
+            length_in_cell[Xcell, Ycell, Zcell] += delta
+
+            if t_next == tMaxX:
+                tMaxX += tDeltaX
+                Xcell += stepX
+            elif t_next == tMaxY:
+                tMaxY += tDeltaY
+                Ycell += stepY
+            else:
+                tMaxZ += tDeltaZ
+                Zcell += stepZ
+
+            t_curr = min(t_next, depth)
+
+        return length_in_cell
+
     def cell_size(self):
-        return self._cell_sizes
+        return self._cell_size
     def source_function(self):
         return self._source_function
     def shape(self):
@@ -221,11 +263,11 @@ class PhotonPacket:
         return self._lambda
 
 class Star:
-    def __init__(self, T, R, D):
+    def __init__(self, T, R, D, direction= (np.pi, 0)):
         self.T = T
         self.R = R
         self.D = D
-        
+        self._direction = direction
 
     def bb_shape_energy_pdf(self, x):
         """
@@ -264,13 +306,10 @@ class Star:
         - We sample *color* (x, hence lambda) from the energy PDF.
         - We give every packet the same weight (energy).
         """
-        h = h.value
-        c = c.value
-        kB = k.value
 
         x_samples = self.sample_blackbody_x(self.T, N)
         x_samples = np.clip(x_samples, 1e-9, None)
-        lam_samples = (h*c) / (kB*self.T * x_samples)  # store if you need lambda-dependent opacities
+        lam_samples = ((h*c) / k_B).value / (self.T * x_samples)  # store if you need lambda-dependent opacities
     
         if use_physical_units:
             # You can later replace this with: weight = (∫F_lambda dλ * area * dt)/N
@@ -280,74 +319,13 @@ class Star:
     
         photons = []
         for i in range(N):
-            p = PhotonPacket(initial, weight)
-            # Optional: keep color for later physics
-            p.lambda_m = float(lam_samples[i])
+            p = PhotonPacket(position = initial[i], 
+                             luminosity=weight, 
+                             wavelength=lam_samples[i], 
+                             initial_theta=self._direction[0], 
+                             initial_phi=self._direction[1])
             photons.append(p)
         return photons
-
-class Simulation:
-    def __init__(self, atmosphere, star, N=10, initial_direction=None):
-        self.atmosphere = atmosphere
-        self.star = star
-        self.N = N
-        initial = np.array([np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N),
-                            np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N),
-                            (self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)*np.ones(N)]).T
-        self.photons = self.star.createPhotonPackets(initial, N, initial_direction=initial_direction)
-
-    def run(self):
-        
-        for photon in self.photons:
-            while photon.luminosity() > photon.luminosity_threshold() and self.atmosphere.in_box(photon.position()):
-                print("Check")
-                photon.random_walk()
-                tau, theta, phi = photon.get_random_walk()
-                
-                length = photon.optical_length()
-                print(f"Optical depth: {tau}, length: {length}, Theta: {theta*180/np.pi}, Phi: {phi*180/np.pi}")
-                self.atmosphere.deposit_luminosity(photon)
-                if self.atmosphere.in_box(photon.position() + photon.direction_in_cartesian(theta, phi) * length):
-                    photon.move()
-                else:
-                    L = self.atmosphere.distance_to_boundary(photon.position(), photon.direction_in_cartesian(theta, phi))
-                    photon.set_optical_length(L)
-                    photon.move()
-                    break
-
-    def plot(self, rays=False):
-
-        norm = colors.Normalize(vmin=np.min(self.atmosphere.source_function()), vmax=np.max(self.atmosphere.source_function()))
-        facecolors = cm.rainbow_r(norm(self.atmosphere.source_function()))
-        nx, ny, nz = self.atmosphere.shape()
-        cell_size = self.atmosphere.cell_size()
-
-        x = np.arange(0, (nx + 1) * cell_size, cell_size)
-        y = np.arange(0, (ny + 1) * cell_size, cell_size)
-        z = np.arange(0, (nz + 1) * cell_size, cell_size)
-
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        plt.figure()
-        ax = plt.axes(projection='3d')
-        ax.voxels(X, Y, Z, self.atmosphere.source_function() > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
-        if rays:
-            for i in range(self.N):
-                ax.plot(
-                    self.photons[i].trajectory()[:,0],
-                    self.photons[i].trajectory()[:,1],
-                    self.photons[i].trajectory()[:,2],
-                    color='r', linewidth=3, label='Ray Path'
-            )
-        ax.set_xlabel('X axis')
-        ax.set_ylabel('Y axis')
-        ax.set_zlabel('Z axis')
-        ax.set_xlim(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size())
-        ax.set_ylim(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size())
-        ax.set_zlim(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size())
-        plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Intensity')
-        plt.savefig('../figures/simulation_output.png')
-        plt.show()
-
 
 class Observer:
     """
@@ -421,7 +399,7 @@ class Observer:
 
                 # integrate emission along this ray
                 lengths = self.atm.compute_length_in_cells(self.position, depth, direction)
-                intensity = np.sum(self.atm.source_function * lengths) #to add the exp(-tau) attenuation factor depending on optical depth?
+                intensity = np.sum(self.atm.source_function() * lengths) #to add the exp(-tau) attenuation factor depending on optical depth?
 
                 #add star  if looking toward the star
                 if include_star:
@@ -447,33 +425,99 @@ class Observer:
             plt.savefig("../figures/render_wo_star.png")
         plt.show()
 
+class Simulation:
+    def __init__(self, atmosphere, star, N=10):
+        self.atmosphere = atmosphere
+        self.star = star
+        self.N = N
+        initial = np.array([np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N),
+                            np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N),
+                            (self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)*np.ones(N)]).T
+        self.photons = self.star.createPhotonPackets(initial, N)
+
+        obs_pos = [(self.atmosphere.shape()[0] * self.atmosphere.cell_size())/2, 
+                   (self.atmosphere.shape()[1] * self.atmosphere.cell_size())/2,
+                    (self.atmosphere.shape()[2] * self.atmosphere.cell_size())/2]
+        self.observer = Observer( self.atmosphere, self.star, 
+                            position=obs_pos, 
+                            image_size=(200, 220), fov_deg=(30, 30), 
+                            up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0]),
+                            star_direction=np.array([0.0, 0.0, 1.0])
+                        )
+
+    def run(self):
+        
+        for photon in self.photons:
+            while photon.luminosity() > photon.luminosity_threshold() and self.atmosphere.in_box(photon.position()):
+                print("Check")
+                photon.random_walk()
+                tau, theta, phi = photon.get_random_walk()
+                
+                length = photon.optical_length()
+                print(f"Optical depth: {tau}, length: {length}, Theta: {theta*180/np.pi}, Phi: {phi*180/np.pi}")
+                self.atmosphere.deposit_luminosity(photon)
+                if self.atmosphere.in_box(photon.position() + photon.direction_in_cartesian(theta, phi) * length):
+                    photon.move()
+                else:
+                    L = self.atmosphere.distance_to_boundary(photon.position(), photon.direction_in_cartesian(theta, phi))
+                    photon.set_optical_length(L)
+                    photon.move()
+                    break
+
+    def plot(self, rays=False):
+
+        norm = colors.Normalize(vmin=np.min(self.atmosphere.source_function()), vmax=np.max(self.atmosphere.source_function()))
+        facecolors = cm.rainbow_r(norm(self.atmosphere.source_function()))
+        nx, ny, nz = self.atmosphere.shape()
+        cell_size = self.atmosphere.cell_size()
+
+        x = np.arange(0, (nx + 1) * cell_size, cell_size)
+        y = np.arange(0, (ny + 1) * cell_size, cell_size)
+        z = np.arange(0, (nz + 1) * cell_size, cell_size)
+
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        plt.figure()
+        ax = plt.axes(projection='3d')
+        ax.voxels(X, Y, Z, self.atmosphere.source_function() > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
+        if rays:
+            for i in range(self.N):
+                ax.plot(
+                    self.photons[i].trajectory()[:,0],
+                    self.photons[i].trajectory()[:,1],
+                    self.photons[i].trajectory()[:,2],
+                    color='r', linewidth=3, label='Ray Path'
+            )
+        ax.set_xlabel('X axis')
+        ax.set_ylabel('Y axis')
+        ax.set_zlabel('Z axis')
+        ax.set_xlim(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size())
+        ax.set_ylim(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size())
+        ax.set_zlim(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size())
+        plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Intensity')
+        plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/simulation_output.png')
+        plt.show()
+
+    def observe(self):
+
+        image = self.observer.render(include_star=True)
+        self.observer.show(image,include_star=True)
+
 if __name__ == "__main__":
-    boxsize = (40, 40, 40)
+    boxsize = (10, 10, 10)
+    cell_size = 1.0e4
     T = 5800
     R = 700
     D = 1.5e11
-    N = 100
-
-    star = Star(T, R, D)
-    atmosphere = Atmosphere(boxsize)
-    sim = Simulation(atmosphere, star, N)
+    N = 1
+    
+    star = Star(T, R, D, direction=(np.pi, 0))
     atm = Atmosphere(shape = boxsize, cell_size=cell_size)
-    # Par exemple, direction verticale
-    initial_direction = (np.pi, 0)  # theta=, phi=0
-    sim = Simulation(atm, star, N, initial_direction=initial_direction)
+    sim = Simulation(atm, star, N)
     sim.run()
-    sim.plot()
+    sim.plot(rays=True)
+    sim.observe()
 
-    obs_pos = [boxsize[0]/2, boxsize[1]/2, boxsize[2]/2]
-    observer = Observer( atmosphere, star, 
-                         position=obs_pos, 
-                         image_size=(200, 220), fov_deg=(30, 30), 
-                         up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0]),
-                         star_direction=np.array([0.0, 0.0, 1.0])
-                       )
-
-    image = observer.render(include_star=True)
-    observer.show(image,include_star=True)
+    
 
 
 
