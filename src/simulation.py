@@ -348,20 +348,246 @@ class Simulation:
         plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/simulation_output.png')
         plt.show()
 
+
+class Observer:
+    """
+    Integrate the source function of the star along all lines of sight to render an image
+    """
+
+    def __init__(self, atmosphere, star, position,
+                 image_size=(200, 200), fov_deg=(10.0,10.0),
+                 up=np.array([0.0, 1.0, 0.0]),
+                 forward=np.array([0.0, 0.0, 1.0]),
+                 star_direction=np.array([0.0, 0.0, 1.0])):
+        """
+        atmosphere : Atmosphere object
+        star       : Star object 
+        position   : Array, 3D coordinates i nside the atmosphere
+        image_size : image size in pixels
+        fov_deg    : field of view in degrees
+        up, forward: camera orientation vectors
+        star_direction : unit vector pointing from observer to star
+        
+        """
+        self.atm = atmosphere
+        self.star = star
+        self.position = np.array(position, dtype=float)
+        self.nx, self.ny = image_size
+        self.fov_x = np.deg2rad(fov_deg[0])
+        self.fov_y = np.deg2rad(fov_deg[0])
+
+        # camera orientation
+        self.forward = forward / np.linalg.norm(forward) #+Z by default
+        self.up = up / np.linalg.norm(up) #Y by default
+        self.right = np.cross(self.forward, self.up)
+        self.right /= np.linalg.norm(self.right)
+        self.up = np.cross(self.right, self.forward)
+        self.up /= np.linalg.norm(self.up)
+
+        self.star_direction = star_direction / np.linalg.norm(star_direction)
+
+    # -----------------------------------------------------------
+    def ray_direction(self, i, j):
+        """Return 3D ray direction for pixel (i, j) taking into account the fov
+        https://en.wikipedia.org/wiki/Field_of_view_in_video_games"""
+        x = (2*(i + 0.5) / self.nx - 1) * np.tan(self.fov_x/2) #horizontal (right) and vertical (up) fov
+        y = (2*(j + 0.5) / self.ny - 1) * np.tan(self.fov_y/2) #(x,y) = position of pixel from the observer
+        
+        
+        dir_cam = self.forward + x*self.right + y*self.up #https://en.wikipedia.org/wiki/Pinhole_camera_model / https://hedivision.github.io/Pinhole.html
+        
+        return dir_cam / np.linalg.norm(dir_cam)
+
+    # -----------------------------------------------------------
+    def star_angular_radius(self):
+        """Compute the angular radius of the star""" 
+        return np.arcsin(np.clip(self.star.R*1e6 / self.star.D, 0.0, 1.0)) 
+
+    # -----------------------------------------------------------
+    def render(self, include_star=True):
+        """
+        Integrate the source function along each ray
+        Returns a 2D numpy array
+        """
+        img = np.zeros((self.ny, self.nx))
+        star_ang = self.star_angular_radius()
+
+        for j in range(self.ny):
+            for i in range(self.nx):
+                direction = self.ray_direction(i, j)
+                depth = self.atm.distance_to_boundary(self.position, direction)
+                if depth <= 0:
+                    continue
+
+                # integrate emission along this ray
+                lengths = self.atm.compute_length_in_cells(self.position, depth, direction)
+                intensity = np.sum(self.atm.source_function * lengths) #to add the exp(-tau) attenuation factor depending on optical depth?
+
+                #add star  if looking toward the star
+                if include_star:
+                    cosang = np.dot(direction, self.star_direction)
+                    if cosang > np.cos(star_ang): 
+                        intensity += 1.0  # put 1 as a placeholder, supposed to the intensity of the star
+
+                img[j, i] = intensity
+
+        return img
+
+    # -----------------------------------------------------------
+    def show(self, image, cmap='inferno', include_star=True):
+        norm = colors.Normalize(vmin=np.min(image), vmax=np.max(image))
+        plt.figure(figsize=(6,6))
+        plt.imshow(image, origin='lower', cmap=cmap, norm=norm)
+        plt.colorbar(label='Integrated intensity')
+        plt.xlabel('x pixel')
+        plt.ylabel('y pixel')
+        if include_star==True:
+            plt.savefig("../figures/render_w_star.png")
+        else:
+            plt.savefig("../figures/render_wo_star.png")
+        plt.show()
+
+
+class Observer:
+    """
+    Integrate the source function of the star along all lines of sight to render an image
+    """
+
+    def __init__(self, atmosphere, star, position,
+                 image_size=(200, 200), fov_deg=(10.0,10.0),
+                 up=np.array([0.0, 1.0, 0.0]),
+                 forward=np.array([0.0, 0.0, 1.0]),
+                 star_direction=np.array([0.0, 0.0, 1.0])):
+        """
+        atmosphere : Atmosphere object
+        star       : Star object 
+        position   : Array, 3D coordinates i nside the atmosphere
+        image_size : image size in pixels
+        fov_deg    : field of view in degrees
+        up, forward: camera orientation vectors
+        star_direction : unit vector pointing from observer to star
+        
+        """
+        self.atm = atmosphere
+        self.star = star
+        self.position = np.array(position, dtype=float)
+        self.nx, self.ny = image_size
+        self.fov_x = np.deg2rad(fov_deg[0])
+        self.fov_y = np.deg2rad(fov_deg[0])
+
+        # camera orientation
+        self.forward = forward / np.linalg.norm(forward) #+Z by default
+        self.up = up / np.linalg.norm(up) #Y by default
+        self.right = np.cross(self.forward, self.up)
+        self.right /= np.linalg.norm(self.right)
+        self.up = np.cross(self.right, self.forward)
+        self.up /= np.linalg.norm(self.up)
+
+        self.star_direction = star_direction / np.linalg.norm(star_direction)
+
+    # -----------------------------------------------------------
+    def ray_direction(self, i, j):
+        """Return 3D ray direction for pixel (i, j) taking into account the fov
+        https://en.wikipedia.org/wiki/Field_of_view_in_video_games"""
+        x = (2*(i + 0.5) / self.nx - 1) * np.tan(self.fov_x/2) #horizontal (right) and vertical (up) fov
+        y = (2*(j + 0.5) / self.ny - 1) * np.tan(self.fov_y/2) #(x,y) = position of pixel from the observer
+        
+        
+        dir_cam = self.forward + x*self.right + y*self.up #https://en.wikipedia.org/wiki/Pinhole_camera_model / https://hedivision.github.io/Pinhole.html
+        
+        return dir_cam / np.linalg.norm(dir_cam)
+
+    # -----------------------------------------------------------
+    def star_angular_radius(self):
+        """Compute the angular radius of the star""" 
+        return np.arcsin(np.clip(self.star.R*1e6 / self.star.D, 0.0, 1.0)) 
+
+    # -----------------------------------------------------------
+    def render(self, include_star=True):
+        """
+        Integrate the source function along each ray
+        Returns a 2D numpy array
+        """
+        img = np.zeros((self.ny, self.nx))
+        star_ang = self.star_angular_radius()
+
+        for j in range(self.ny):
+            for i in range(self.nx):
+                direction = self.ray_direction(i, j)
+                depth = self.atm.distance_to_boundary(self.position, direction)
+                if depth <= 0:
+                    continue
+
+                # integrate emission along this ray
+                lengths = self.atm.compute_length_in_cells(self.position, depth, direction)
+                intensity = np.sum(self.atm.source_function * lengths) #to add the exp(-tau) attenuation factor depending on optical depth?
+
+                #add star  if looking toward the star
+                if include_star:
+                    cosang = np.dot(direction, self.star_direction)
+                    if cosang > np.cos(star_ang): 
+                        intensity += 1.0  # put 1 as a placeholder, supposed to the intensity of the star
+
+                img[j, i] = intensity
+
+        return img
+
+    # -----------------------------------------------------------
+    def show(self, image, cmap='inferno', include_star=True):
+        norm = colors.Normalize(vmin=np.min(image), vmax=np.max(image))
+        plt.figure(figsize=(6,6))
+        plt.imshow(image, origin='lower', cmap=cmap, norm=norm)
+        plt.colorbar(label='Integrated intensity')
+        plt.xlabel('x pixel')
+        plt.ylabel('y pixel')
+        if include_star==True:
+            plt.savefig("../figures/render_w_star.png")
+        else:
+            plt.savefig("../figures/render_wo_star.png")
+        plt.show()
+
 if __name__ == "__main__":
-    boxsize = (10, 10, 10)
-    cell_size = 1e4
+    boxsize = (40, 40, 40)
     T = 5800
-    R = 696.340
+    R = 700
     D = 1.5e11
-    N = 1
+    N = 100
+
     star = Star(T, R, D)
+    atmosphere = Atmosphere(boxsize)
+    sim = Simulation(atmosphere, star, N)
     atm = Atmosphere(shape = boxsize, cell_size=cell_size)
     # Par exemple, direction verticale
     initial_direction = (np.pi, 0)  # theta=, phi=0
     sim = Simulation(atm, star, N, initial_direction=initial_direction)
     sim.run()
     sim.plot(rays=True)
+
+    obs_pos = [boxsize[0]/2, boxsize[1]/2, boxsize[2]/2]
+    observer = Observer( atmosphere, star, 
+                         position=obs_pos, 
+                         image_size=(200, 220), fov_deg=(30, 30), 
+                         up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0]),
+                         star_direction=np.array([0.0, 0.0, 1.0])
+                       )
+
+    image = observer.render(include_star=True)
+    observer.show(image,include_star=True)
+
+
+
+    obs_pos = [boxsize[0]/2, boxsize[1]/2, boxsize[2]/2]
+    observer = Observer( atmosphere, star, 
+                         position=obs_pos, 
+                         image_size=(200, 220), fov_deg=(30, 30), 
+                         up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0]),
+                         star_direction=np.array([0.0, 0.0, 1.0])
+                       )
+
+    image = observer.render(include_star=True)
+    observer.show(image,include_star=True)
+
+
 
 
 
