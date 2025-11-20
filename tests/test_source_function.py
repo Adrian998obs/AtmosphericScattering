@@ -37,7 +37,7 @@ def test_plot_atmosphere():
     photon = simulation.PhotonPacket()
     photon._theta = 0.9553166181245092  # ~54.7356 degrees
     photon._phi = np.pi / 4
-    dir = photon.direction_in_cartesian(photon._theta, photon._phi)
+    dir = simulation.direction_in_cartesian(photon._theta, photon._phi)
     photon._optical_length = atmosphere.distance_to_boundary(photon.position(), dir)
 
     lengths = atmosphere.deposit_luminosity(photon, return_lengths=True)
@@ -85,16 +85,14 @@ def test_plot_atmosphere():
 def test_plot_sourceFunction():
     """Test the plotting of the source function."""
     atmosphere = simulation.Atmosphere(cell_size=1e4)
-    photon = simulation.PhotonPacket(position=np.array([0,0,10.5]))
+    photon = simulation.PhotonPacket(position=np.array([0,0,atmosphere.shape()[0] * atmosphere.cell_size()/2]))
     photon._theta = np.pi / 2
 
-    dir = photon.direction_in_cartesian(photon._theta, photon._phi)
+    dir = simulation.direction_in_cartesian(photon._theta, photon._phi)
     photon._optical_length = np.min([atmosphere.distance_to_boundary(photon.position(), dir), photon.maximum_optical_depth()/photon._scattering_coefficient])
-    print("Distance to boundary :",atmosphere.distance_to_boundary(photon.position(), dir), " maximal ", photon.maximum_optical_depth(), "optical length:", photon._optical_length)
     atmosphere.deposit_luminosity(photon)
     photon.move()
-    source_function = atmosphere.source_function()
-    print(source_function[source_function>0])
+    source_function = atmosphere.source_function_integrated()
     from matplotlib import cm, colors
     norm = colors.Normalize(vmin=np.min(source_function), vmax=np.max(source_function))
     facecolors = cm.rainbow_r(norm(source_function))
@@ -125,7 +123,20 @@ def test_plot_sourceFunction():
     ax.set_zlim(0, atmosphere.shape()[2] * atmosphere.cell_size())
     plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='intensity')
     plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/test_plot_sourceFunction.png')
-    plt.show()
+    plt.close()
+
+def test_total_luminosity():
+    """Test that the total luminosity does not depend on the photon number"""
+    total_deposited=[]
+    for i in range(2):
+        star = simulation.Star(direction=(np.pi/1.2, 0))
+        atmosphere = simulation.Atmosphere(shape=(10, 10, 10), cell_size=1e4)
+        sim1 = simulation.Simulation(atmosphere, star, N=10000 * (i +1) )
+        sim1.run()
+
+        total_deposited.append(np.sum(atmosphere.source_function_integrated()))
+
+    assert np.isclose(total_deposited[0], total_deposited[1], rtol=1e-2), f"Total deposited luminosity should be similar for different photon numbers, got {total_deposited[0]} and {total_deposited[1]}"
 
 
 if __name__ == "__main__":
@@ -135,4 +146,6 @@ if __name__ == "__main__":
     print("test_plot_atmosphere passed.")
     test_plot_sourceFunction()
     print("test_plot_sourceFunction passed.")
+    test_total_luminosity()
+    print("test_total_luminosity passed.")
 
