@@ -146,47 +146,19 @@ class Atmosphere:
                 integrated[idx] = sum(e for (_, e) in ev)
         return integrated
     
-    def compute_length_in_cells(self, initial_position, depth, direction):
-        """
-        Compute the length of the ray in each cell it traverses.
-        initial_position: (x, y, z) coordinates of the starting point
-        depth: distance to propagate
-        direction: (dx, dy, dz) direction vector
-        Returns: 3D array of lengths in each cell
-        """
-        length_in_cell = np.zeros(self._shape)
-
-        # Step directions
-        stepX = 1 if direction[0] > 0 else -1
-        stepY = 1 if direction[1] > 0 else -1
-        stepZ = 1 if direction[2] > 0 else -1
-
-        # Initial distances to the next planes
-        tMaxX, tMaxY, tMaxZ = self.distance_to_planes(initial_position, direction)
-        t_curr = 0
-        # Parametric distances to cross a cell
-        tDeltaX, tDeltaY, tDeltaZ = self.parametric_distance_in_cell(direction)
-        # Current cell indices
-        Xcell, Ycell, Zcell = np.floor(initial_position/self._cell_size).astype(int)
-
-        while self.in_box([Xcell, Ycell, Zcell], index=True) and t_curr < depth: 
-            t_next = min(tMaxX, tMaxY, tMaxZ)
-            delta = min(t_next, depth) - t_curr
-            length_in_cell[Xcell, Ycell, Zcell] += delta
-
-            if t_next == tMaxX:
-                tMaxX += tDeltaX
-                Xcell += stepX
-            elif t_next == tMaxY:
-                tMaxY += tDeltaY
-                Ycell += stepY
-            else:
-                tMaxZ += tDeltaZ
-                Zcell += stepZ
-
-            t_curr = min(t_next, depth)
-
-        return length_in_cell
+    def source_function_spectral(self, wavelength_bins):
+        """Compute spectral energy per cell on demand."""
+        n_bins = len(wavelength_bins) - 1
+        spectral = np.zeros(self._shape + (n_bins,), dtype=float)
+        for idx in np.ndindex(self._shape):
+            ev = self._source_function[idx]
+            if ev:
+                for (lam, e) in ev:
+                    ib = np.searchsorted(wavelength_bins, lam) - 1
+                    ib = 0 if ib < 0 else (n_bins-1 if ib >= n_bins else ib)
+                    spectral[idx + (ib,)] += e
+        return spectral
+    
 
     def cell_size(self):
         return self._cell_size
@@ -277,11 +249,11 @@ class PhotonPacket:
         return self._lambda
 
 class Star:
-    def __init__(self, model= 'Sun',T=None, R=None, D=None, direction= (np.pi, 0)):
+    def __init__(self, model= 'Sun',T=None, R=None, D=None, direction= (0, 0)):
         if model == 'Sun':
-            self.T = 5800  # Kelvin
-            self.R = 6.96e5  # km
-            self.D = 1.5e8  # km
+            self.T = 5778  # Kelvin
+            self.R = 6.96e8  # meters
+            self.D = 1.5e11  # meters
         else:
             if T is None or R is None or D is None:
                 raise ValueError("For custom star model, T, R, and D must be provided.")
@@ -289,7 +261,7 @@ class Star:
             self.R = R
             self.D = D
 
-        self._luminosity = 4 * np.pi * (self.R*1e6)**2 * 5.67e-8 * self.T**4  # Stefan-Boltzmann law, R in meters
+        self._luminosity = 4 * np.pi * (self.R)**2 * 5.67e-8 * self.T**4  # Stefan-Boltzmann law, R in meters
         self._direction = direction
 
     def bb_shape_energy_pdf(self, x):
@@ -322,7 +294,12 @@ class Star:
                 kept.append(accept[:take])
                 total += take
         return np.concatenate(kept, axis=0)
-        
+    
+    def lambda_sample(self, N):
+        x_samples = self.sample_blackbody_x(self.T, N)
+        lam_samples = ((h*c) / k_B).value / (self.T * x_samples)  # store if you need lambda-dependent opacities
+        return lam_samples
+    
     def createPhotonPackets(self, initial, N, use_physical_units=True, area=1.0, dt=1.0):
         """
         Option A: equal-energy packets.
@@ -330,10 +307,8 @@ class Star:
         - We give every packet the same weight (energy).
         """
 
-        x_samples = self.sample_blackbody_x(self.T, N)
-        x_samples = np.clip(x_samples, 1e-9, None)
-        lam_samples = ((h*c) / k_B).value / (self.T * x_samples)  # store if you need lambda-dependent opacities
-    
+        lam_samples = self.lambda_sample(N)
+
         if use_physical_units:
             # flux at distance D (W/m^2)
             flux = self._luminosity / (4.0 * np.pi * (self.D ** 2))
@@ -349,8 +324,8 @@ class Star:
             p = PhotonPacket(position = initial[i], 
                              luminosity=weight, 
                              wavelength=lam_samples[i], 
-                             initial_theta=self._direction[0], 
-                             initial_phi=self._direction[1])
+                             initial_theta= np.pi - self._direction[0], 
+                             initial_phi= self._direction[1] + np.pi)
             photons.append(p)
         return photons
     
@@ -362,100 +337,230 @@ class Star:
 
 class Observer:
     """
-    Integrate the source function of the star along all lines of sight to render an image
+    Integrate the source function of the star along all lines of sight to render an image.
+    Simple spectral model: observer has 3 spectral bins (R,G,B) with configurable sensitivities.
     """
-
     def __init__(self, atmosphere, star, position,
                  image_size=(200, 200), fov_deg=(10.0,10.0),
                  up=np.array([0.0, 1.0, 0.0]),
-                 forward=np.array([0.0, 0.0, 1.0])):
-        """
-        atmosphere : Atmosphere object
-        star       : Star object 
-        position   : Array, 3D coordinates i nside the atmosphere
-        image_size : image size in pixels
-        fov_deg    : field of view in degrees
-        up, forward: camera orientation vectors
-        star_direction : unit vector pointing from observer to star
-        
-        """
+                 forward=np.array([0.0, 0.0, 1.0]),
+                 # spectral settings: bin edges in meters and per-bin efficiency
+                 spectral_edges=None,
+                 spectral_efficiency=None):
         self.atm = atmosphere
         self.star = star
         self.position = np.array(position, dtype=float)
         self.nx, self.ny = image_size
         self.fov_x = np.deg2rad(fov_deg[0])
-        self.fov_y = np.deg2rad(fov_deg[0])
+        self.fov_y = np.deg2rad(fov_deg[1])
 
         # camera orientation
-        self.forward = forward / np.linalg.norm(forward) #+Z by default
-        self.up = up / np.linalg.norm(up) #Y by default
+        self.forward = forward / np.linalg.norm(forward)
+        self.up = up / np.linalg.norm(up)
         self.right = np.cross(self.forward, self.up)
         self.right /= np.linalg.norm(self.right)
         self.up = np.cross(self.right, self.forward)
         self.up /= np.linalg.norm(self.up)
+
         theta, phi = star.direction()
-        self.star_direction = direction_in_cartesian(theta, phi) / np.linalg.norm(direction_in_cartesian(theta, phi))
+        self.star_direction = np.array([theta, phi])
+        print(f"Star direction (theta, phi): {self.star_direction * 180/np.pi} degrees")
+
+        # spectral bins: default visible-ish bins (meters)
+        if spectral_edges is None:
+            # edges: [blue_start, green_start, red_start, red_end] in meters
+            self.spectral_edges = np.array([380e-9, 495e-9, 570e-9, 700e-9])
+        else:
+            self.spectral_edges = np.asarray(spectral_edges, dtype=float)
+
+        # per-bin efficiency (sensitivity) for R,G,B order (len = 3)
+        if spectral_efficiency is None:
+            # default simple eye-like sensitives (relative)
+            self.spectral_efficiency = np.array([0.6, 1.0, 0.9])
+        else:
+            self.spectral_efficiency = np.asarray(spectral_efficiency, dtype=float)
 
     # -----------------------------------------------------------
     def ray_direction(self, i, j):
-        """Return 3D ray direction for pixel (i, j) taking into account the fov
-        https://en.wikipedia.org/wiki/Field_of_view_in_video_games"""
-        x = (2*(i + 0.5) / self.nx - 1) * np.tan(self.fov_x/2) #horizontal (right) and vertical (up) fov
-        y = (2*(j + 0.5) / self.ny - 1) * np.tan(self.fov_y/2) #(x,y) = position of pixel from the observer
-        
-        
-        dir_cam = self.forward + x*self.right + y*self.up #https://en.wikipedia.org/wiki/Pinhole_camera_model / https://hedivision.github.io/Pinhole.html
-        
+        """Return 3D ray direction for pixel (i, j) taking into account the fov"""
+        x = (2*(i + 0.5) / self.nx - 1) * np.tan(self.fov_x/2)
+        y = (2*(j + 0.5) / self.ny - 1) * np.tan(self.fov_y/2)
+        dir_cam = self.forward + x*self.right + y*self.up
         return dir_cam / np.linalg.norm(dir_cam)
-
+    
+    def pixels_to_angles(self, i, j, coord='cartesian'):
+        """
+        Very simple: map each pixel to a direction (theta, phi) uniformly over the sphere:
+        - theta in (0, pi) (colatitude)
+        - phi in (-pi, pi)
+        Returns (theta_map, phi_map) with shape (ny, nx).
+        """
+        theta = np.pi * (j + 0.5) / self.ny        # colatitude 0..pi
+        phi = 2.0 * np.pi * (i + 0.5) / self.nx - np.pi  # azimuth -pi..pi
+        if coord == 'spherical':
+            return theta, phi
+        dir_vec = direction_in_cartesian(theta, phi)
+        return dir_vec
     # -----------------------------------------------------------
     def star_angular_radius(self):
-        """Compute the angular radius of the star""" 
-        return np.arcsin(np.clip(self.star.R*1e6 / self.star.D, 0.0, 1.0)) 
+        return np.arctan(np.clip(self.star.R/ self.star.D, 0.0, 1.0))
 
     # -----------------------------------------------------------
-    def render(self, include_star=True):
+    def compute_length_in_cells(self, initial_position, depth, direction, source_function_spectral, alpha):
         """
-        Integrate the source function along each ray
-        Returns a 2D numpy array
+        Compute the length of the ray in each cell it traverses.
+        initial_position: (x, y, z) coordinates of the starting point
+        depth: distance to propagate
+        direction: (dx, dy, dz) direction vector
+        Returns: 3D array of lengths in each cell
         """
-        img = np.zeros((self.ny, self.nx))
-        star_ang = self.star_angular_radius()
+        length_in_cell = np.zeros((self.atm.shape())+ (self._n_bins,), dtype=float)
 
+        # Step directions
+        stepX = 1 if direction[0] > 0 else -1
+        stepY = 1 if direction[1] > 0 else -1
+        stepZ = 1 if direction[2] > 0 else -1
+
+        # Initial distances to the next planes
+        tMaxX, tMaxY, tMaxZ = self.atm.distance_to_planes(initial_position, direction)
+        t_curr = 0
+        # Parametric distances to cross a cell
+        tDeltaX, tDeltaY, tDeltaZ = self.atm.parametric_distance_in_cell(direction)
+        # Current cell indices
+        Xcell, Ycell, Zcell = np.floor(initial_position/self.atm.cell_size()).astype(int)
+
+        while self.atm.in_box([Xcell, Ycell, Zcell], index=True) and t_curr < depth: 
+            t_next = min(tMaxX, tMaxY, tMaxZ)
+            delta = min(t_next, depth) - t_curr
+            length_in_cell[Xcell, Ycell, Zcell] += alpha * delta * source_function_spectral[Xcell, Ycell, Zcell] * np.exp(-alpha * (depth - t_curr))
+
+            if t_next == tMaxX:
+                tMaxX += tDeltaX
+                Xcell += stepX
+            elif t_next == tMaxY:
+                tMaxY += tDeltaY
+                Ycell += stepY
+            else:
+                tMaxZ += tDeltaZ
+                Zcell += stepZ
+
+            t_curr = min(t_next, depth)
+
+        return np.sum(length_in_cell, axis = (0,1,2))
+    
+    def render(self, projection='fisheye', radius_ratio=1.0, include_star=True, rayleigh_n=2.5e25):
+        """
+        Render sky with discrete RT along rays.
+        Returns numpy array (ny, nx, 3) with channels in order [B, G, R].
+        projection: 'fisheye' (hemisphere) or 'equirect' (full sphere)
+        rayleigh_n: number density used for simple Rayleigh extinction σ(λ)*n
+        """
+        img = np.zeros((self.ny, self.nx, 3), dtype=float)
+        edges = self.spectral_edges  # edges length = 4 -> 3 bins
+        self._n_bins = len(edges) - 1
+        cx = (self.nx - 1) / 2.0
+        cy = (self.ny - 1) / 2.0
+        Rpix = min(self.nx, self.ny) / 2.0 * radius_ratio
+        cell_size = self.atm.cell_size()
+        cell_vol = cell_size**3
+        # simple Rayleigh σ(λ) ~ 4.3e-56 / λ^4 (m^2) used if no atmosphere model per-cell
+        sigma_prefactor = 4.3e-56
+        lam_center = [0.5 * (edges[b] + edges[b+1]) for b in range(self._n_bins)]
+        sigma = sigma_prefactor / (np.array(lam_center) ** 4)
+        alpha = sigma * rayleigh_n 
+
+        source_function_spectral = self.atm.source_function_spectral(edges)
+
+        # loop pixels
         for j in range(self.ny):
             for i in range(self.nx):
-                direction = self.ray_direction(i, j)
-                depth = self.atm.distance_to_boundary(self.position, direction)
+                # build direction for this pixel
+                if projection == 'equirect':
+                    # map pixel to (theta, phi)
+                    theta = np.pi * (j + 0.5) / self.ny       # 0..pi
+                    phi = 2*np.pi * (i + 0.5) / self.nx - np.pi
+                    dir_vec = np.cos(theta)*self.forward + np.sin(theta)*(np.cos(phi)*self.right + np.sin(phi)*self.up)
+                    dir_vec /= np.linalg.norm(dir_vec)
+                
+                elif projection == 'pinhole':
+                    dir_vec = self.pixels_to_angles(i, j, coord='cartesian')
+
+                else:  # fisheye hemisphere equidistant
+                    dx = (i - cx) / Rpix
+                    dy = (j - cy) / Rpix
+                    r = np.hypot(dx, dy)
+                    if r > 1.0:
+                        continue
+                    theta = r * (np.pi/2.0)
+                    phi = np.arctan2(dy, dx)
+                    dir_vec = np.cos(theta)*self.forward + np.sin(theta)*(np.cos(phi)*self.right + np.sin(phi)*self.up)
+                    dir_vec /= np.linalg.norm(dir_vec)
+
+                depth = self.atm.distance_to_boundary(self.position, dir_vec)
                 if depth <= 0:
                     continue
-
-                # integrate emission along this ray
-                lengths = self.atm.compute_length_in_cells(self.position, depth, direction)
-                intensity = np.sum(self.atm.source_function_integrated() * lengths) #to add the exp(-tau) attenuation factor depending on optical depth?
-
-                #add star  if looking toward the star
+                pixel_spectral = self.compute_length_in_cells(self.position, depth, dir_vec, source_function_spectral, alpha)
+                
                 if include_star:
-                    cosang = np.dot(direction, self.star_direction)
-                    if cosang > np.cos(star_ang): 
-                        intensity += 1.0  # put 1 as a placeholder, supposed to the intensity of the star
+                    
+                    # check if star is in this pixel
+                    star_theta, star_phi = self.star_direction
+                    star_dir = direction_in_cartesian(star_theta, star_phi)
+                    star_dir /= np.linalg.norm(star_dir)
+                    cos_angle = np.dot(dir_vec, star_dir)
+                    angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+                    #print("Stellar angular radius (rad):", self.star_angular_radius())
+                    if angle < self.star_angular_radius():
+                        print(f"Pixel ({i}, {j}) includes star at angle {angle*180/np.pi} deg")
+                        # angular size and solid angle of the star
+                        alpha_star = self.star_angular_radius()
+                        omega_star = 2.0 * np.pi * (1.0 - np.cos(alpha_star))
 
-                img[j, i] = intensity
+                        # spectral fractions per bin (R,G,B order as used)
+                        star_spec = np.array([0.125, 0.136, 0.103])
+                        L_b = self.star.luminosity() * star_spec  # luminosity per band (W)
+
+                        # pixel solid angle (approx) using camera FOV
+                        dtheta = self.fov_y / self.ny
+                        dphi = self.fov_x / self.nx
+                        theta_pix = np.arccos(np.clip(np.dot(dir_vec, self.forward), -1.0, 1.0))
+                        delta_omega = np.sin(theta_pix) * dtheta * dphi
+
+                        # CORRECTION: fraction of the STAR's solid angle that the pixel covers
+                        # If pixel is smaller than the star: frac = ΔΩ_pixel / Ω_star
+                        # If pixel is larger: frac = 1 (pixel contains whole star disk)
+                        if omega_star <= 0 or delta_omega <= 0:
+                            frac = 0.0
+                        else:
+                            frac = min(1.0, delta_omega / omega_star)
+
+                        # add band-by-band: F_b = L_b / (4πD^2), attenuated by atmosphere
+                        for b in range(self._n_bins):
+                            transmittance_star = np.exp(-alpha[b] * depth)
+                            F_b = L_b[b] / (4.0 * np.pi * (self.star.D ** 2))
+                            pixel_spectral[b] += F_b * frac * transmittance_star
+                
+                img[j, i, :] = pixel_spectral
 
         return img
-
-    # -----------------------------------------------------------
-    def show(self, image, cmap='inferno', include_star=True):
-        norm = colors.Normalize(vmin=np.min(image), vmax=np.max(image))
-        plt.figure(figsize=(6,6))
-        plt.imshow(image, origin='lower', cmap=cmap, norm=norm)
-        plt.colorbar(label='Integrated intensity')
-        plt.xlabel('x pixel')
-        plt.ylabel('y pixel')
-        if include_star==True:
-            plt.savefig("/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/render_w_star.png")
-        else:
-            plt.savefig("/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/render_wo_star.png")
+    
+    def show_truecolor(self, img):
+        """Display rendered image as truecolor using spectral sensitivities."""
+        # normalize per channel with efficiency
+        rgb = np.zeros_like(img)
+        for c in range(3):
+            rgb[:, :, c] = img[:, :, 2 - c] * self.spectral_efficiency[c]
+        # normalize to max
+        max_val = np.max(rgb)
+        if max_val > 0:
+            rgb /= max_val
+        plt.figure(figsize=(8, 8))
+        extent = [360,0, 180, 0]
+        plt.imshow(rgb, origin='upper', extent=extent)
+        #plt.axis('off')
+        plt.savefig('./figures/observer_output.png')
         plt.show()
+
 
 class Simulation:
     def __init__(self, atmosphere, star, N=10):
@@ -473,7 +578,7 @@ class Simulation:
                     (self.atmosphere.shape()[2] * self.atmosphere.cell_size())/2]
         self.observer = Observer( self.atmosphere, self.star, 
                             position=obs_pos, 
-                            image_size=(200, 220), fov_deg=(30, 30), 
+                            image_size=(500, 500), fov_deg=(30, 30), 
                             up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0])
                         )
 
@@ -524,20 +629,22 @@ class Simulation:
         ax.set_ylim(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size())
         ax.set_zlim(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size())
         plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Intensity')
-        plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/simulation_output.png')
+        plt.savefig('./figures/simulation_output.png')
         plt.show()
 
     def observe(self):
 
-        image = self.observer.render(include_star=True)
-        self.observer.show(image,include_star=True)
+        img = self.observer.render(include_star=True, projection='pinhole')
+
+        self.observer.show_truecolor(img)
+
 
 if __name__ == "__main__":
     boxsize = (10, 10, 10)
-    cell_size = 1.0e4
+    cell_size = 5e3
 
-    N = 10
-    star = Star(model='Sun', direction=(np.pi/1.2, 0))
+    N = 10000
+    star = Star(model='Sun', direction=(np.pi/10, np.pi/2))
     atm = Atmosphere(shape = boxsize, cell_size=cell_size)
     sim = Simulation(atm, star, N)
     sim.run()

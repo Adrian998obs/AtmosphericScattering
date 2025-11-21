@@ -122,8 +122,8 @@ def test_plot_sourceFunction():
     ax.set_ylim(0, atmosphere.shape()[1] * atmosphere.cell_size())
     ax.set_zlim(0, atmosphere.shape()[2] * atmosphere.cell_size())
     plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='intensity')
-    plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/test_plot_sourceFunction.png')
-    plt.close()
+    plt.savefig('./figures/test_plot_sourceFunction.png')
+    plt.show()
 
 def test_total_luminosity():
     """Test that the total luminosity does not depend on the photon number"""

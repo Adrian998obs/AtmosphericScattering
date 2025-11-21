@@ -29,7 +29,7 @@ def test_RW():
     ax.set_xlim(0, atmosphere.shape()[0]*cell_size)
     ax.set_ylim(0, atmosphere.shape()[1]*cell_size)
     ax.set_zlim(0, atmosphere.shape()[2]*cell_size)
-    plt.savefig('/home/localuser/Documents/MC_RAD/AtmosphericScattering/figures/test_randomWalk.png')
+    plt.savefig('./figures/test_randomWalk.png')
     plt.close()
 
 def test_mfp():
@@ -38,15 +38,17 @@ def test_mfp():
     lengths = np.array([])
     N = 10000
     for _ in range(N):
-        photon = simulation.PhotonPacket(position=np.array([0,0,5.5]), wavelength=650e-9)
+        photon = simulation.PhotonPacket(position=np.array([0,0,5.5]), wavelength=800e-9)
         photon.random_walk()
         length = photon.optical_length()
         lengths = np.append(lengths, length)
-
+    mean_optical_depth = np.mean(lengths * photon.scattering_coefficient())
     mean_length = np.mean(lengths)
     theoretical_mfp = 1 / photon.scattering_coefficient()
     print(f"Theoretical Mean Free Path of Photon with wavelength {photon.wavelength()*1e9:.0f} nm: {theoretical_mfp*1e-3:.4f} km")
     print(f"Mean free path length of {N} realizations: {mean_length*1e-3:.4f} km")
+    print(f"Mean optical depth of {N} realizations: {mean_optical_depth:.4f}")
+    print(f"Scattering Coefficient: alpha={photon.scattering_coefficient():.0e} m^-1")
     assert np.isclose(mean_length, theoretical_mfp, rtol=0.1), "Mean free path does not match theoretical value within 10%."
     
 if __name__ == "__main__":
