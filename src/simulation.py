@@ -280,52 +280,91 @@ class Star:
         out[small]  = x[small]**2
         out[~small] = x[~small]**3 / (np.exp(x[~small]) - 1.0)
         return out  # unnormalized, fine for rejection
-    
-    def sample_blackbody_x(self, T, N, x_max=20.0, y_max=1.6):
+
+    def sample_blackbody_x(self, N, x_max=20.0, y_max=1.6, lam_band_m=None):
         """
-        Rejection sample x ~ energy PDF. Returns N samples of x.
+        Rejection- ample x = h*nu/(k_B*T) ~ energy PDF, from the blackbody *energy* PDF f(x) ~~ x^3/(exp(x)-1).
+        Returns N samples of x with the wavelength band chosen.
         NOTE: we track the *number accepted*, not the number of batches.
         """
+        
         kept = []
         total = 0
         batch = max(1000, N // 5)
+    
+        if lam_band_m is not None:
+            lam_min, lam_max = lam_band_m
+            # x = hc/(λ kT)
+            x_low  = (h.value * c.value) / (k_B.value * self.T * lam_max)  # from λ_max
+            x_high = (h.value * c.value) / (k_B.value * self.T * lam_min)  # from λ_min
+            x_low  = max(0.0, x_low)
+            x_high = min(x_max, x_high)
+            if not (x_high > x_low):
+                raise ValueError(f"Banded sampler: empty x-range. "
+                                 f"Try increasing x_max or widening λ-band. "
+                                 f"(x_low={x_low:.3g}, x_high={x_high:.3g})")
+    
         while total < N:
             x = np.random.uniform(0.0, x_max, size=batch)
             y = np.random.uniform(0.0, y_max, size=batch)
             f = self.bb_shape_energy_pdf(x)
-            accept = x[y < f]
-            if accept.size:
-                take = min(N - total, accept.size)
-                kept.append(accept[:take])
-                total += take
+            acc = x[y < f]
+            if lam_band_m is not None:
+                acc = acc[(acc >= x_low) & (acc <= x_high)]
+            take = min(N - total, acc.size)
+            if take:
+                kept.append(acc[:take]); total += take
         return np.concatenate(kept, axis=0)
-        
-    def createPhotonPackets(self, initial, N, use_physical_units=False, area=1.0, dt=1.0):
-        """
-        Option A: equal-energy packets.
-        - We sample *color* (x, hence lambda) from the energy PDF.
-        - We give every packet the same weight (energy).
-        """
 
-        x_samples = self.sample_blackbody_x(self.T, N)
-        x_samples = np.clip(x_samples, 1e-9, None)
-        lam_samples = ((h*c) / k_B).value / (self.T * x_samples)  # store if you need lambda-dependent opacities
+    
+    def planck_B_lambda(self, lam_m):
+        """
+        Planck's law for black body for then to be calculated into spectral irradiance
+        """
+        lam = np.asarray(lam_m, dtype=float)
+        lam = np.clip(lam, 1e-20, None)
+        a = 2.0 * h.value * c.value**2 / lam**5
+        b = h.value * c.value / (lam * k_B.value * self.T)
+        
+        with np.errstate(over='ignore', under='ignore'):
+            return a / np.expm1(b)
+
+    
+    def irradiance_F_lambda(self, lam_m):
+        """
+        Flux density from the star
+        """
+        return np.pi * (self.R / self.D)**2 * self.planck_B_lambda(lam_m)
+
+    
+    def createPhotonPackets(self, initial, N, use_physical_units=True, 
+                            area=1.0, dt=1.0,
+                            lam_band_nm=(1e-5, 1_000_000.0)):            # 1 nm – 1 mm
+        lam_band_m = (lam_band_nm[0]*1e-9, lam_band_nm[1]*1e-9)
+    
+        x_samples = self.sample_blackbody_x(N, x_max=20.0, y_max=1.6, lam_band_m=lam_band_m)
+        x_samples = np.clip(x_samples, 1e-12, None)
+        lam_samples = ((h*c) / k_B).value / (self.T * x_samples)
     
         if use_physical_units:
-            # You can later replace this with: weight = (∫F_lambda dλ * area * dt)/N
-            weight = 1.0 / N
+            lam_grid = np.linspace(lam_band_m[0], lam_band_m[1], 5000)
+            F = self.irradiance_F_lambda(lam_grid)
+            band_power_per_area = np.trapezoid(F, lam_grid)
+            total_band_energy   = band_power_per_area * area * dt
+            weight = total_band_energy / N
         else:
-            weight = 1.0  # relative units: every packet identical
+            weight = 1.0
     
         photons = []
         for i in range(N):
-            p = PhotonPacket(position = initial[i], 
-                             luminosity=weight, 
-                             wavelength=lam_samples[i], 
-                             initial_theta=self._direction[0], 
+            p = PhotonPacket(position=initial[i],
+                             luminosity=weight,
+                             wavelength=lam_samples[i],
+                             initial_theta=self._direction[0],
                              initial_phi=self._direction[1])
             photons.append(p)
         return photons
+
 
 class Observer:
     """
@@ -379,7 +418,7 @@ class Observer:
     # -----------------------------------------------------------
     def star_angular_radius(self):
         """Compute the angular radius of the star""" 
-        return np.arcsin(np.clip(self.star.R*1e6 / self.star.D, 0.0, 1.0)) 
+        return np.arcsin(np.clip(self.star.R / self.star.D, 0.0, 1.0)) # before it was R*1e6, i changed it so it is more consistent we put the actual avalue in the main func
 
     # -----------------------------------------------------------
     def render(self, include_star=True):
@@ -427,13 +466,24 @@ class Observer:
 
 class Simulation:
     def __init__(self, atmosphere, star, N=10):
+
+        
         self.atmosphere = atmosphere
         self.star = star
         self.N = N
         initial = np.array([np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N),
                             np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N),
                             (self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)*np.ones(N)]).T
-        self.photons = self.star.createPhotonPackets(initial, N)
+        
+        nx, ny, _ = self.atmosphere.shape()
+        dx = self.atmosphere.cell_size()
+        area = (nx*dx) * (ny*dx)   # top surface area
+        dt   = 1.0                 # s
+
+        self.photons = self.star.createPhotonPackets(initial, self.N,
+                                                     use_physical_units=True,
+                                                     area=area, dt=dt,
+                                                     lam_band_nm=(1e-5, 1_000_000.0))
 
         obs_pos = [(self.atmosphere.shape()[0] * self.atmosphere.cell_size())/2, 
                    (self.atmosphere.shape()[1] * self.atmosphere.cell_size())/2,
@@ -506,7 +556,7 @@ if __name__ == "__main__":
     boxsize = (10, 10, 10)
     cell_size = 1.0e4
     T = 5800
-    R = 700
+    R = 7e8 #m
     D = 1.5e11
     N = 1
     
