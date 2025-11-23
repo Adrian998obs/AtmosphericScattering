@@ -21,6 +21,9 @@ class Atmosphere:
         for idx in np.ndindex(self._shape):
             self._source_function[idx] = []  # liste vide par voxel
 
+        self._source_function_integrated = None
+        self._spectral_source_function = None
+
     def in_box(self, position, index=False):
         if index:
             return all(0 <= position[i] < self._shape[i] for i in range(3))
@@ -137,16 +140,23 @@ class Atmosphere:
         if return_lengths:
             return length_in_cell
         
-    def source_function_integrated(self):
-        """Compute integrated (over λ) energy per cell on demand."""
-        integrated = np.zeros(self._shape, dtype=float)
+    def integrate_source_function(self):
+        """Compute total luminosity per cell on demand."""
+        total = np.zeros(self._shape, dtype=float)
         for idx in np.ndindex(self._shape):
             ev = self._source_function[idx]
             if ev:
-                integrated[idx] = sum(e for (_, e) in ev)
-        return integrated
+                total[idx] = sum(e for (_, e) in ev)
+        self._source_function_integrated = total
+        return total
     
-    def source_function_spectral(self, wavelength_bins):
+    def source_function_integrated(self):
+        """Return integrated source function, computing if necessary."""
+        if self._source_function_integrated is None:
+            return self.integrate_source_function()
+        return self._source_function_integrated
+
+    def compute_source_function_spectral(self, wavelength_bins):
         """Compute spectral energy per cell on demand."""
         n_bins = len(wavelength_bins) - 1
         spectral = np.zeros(self._shape + (n_bins,), dtype=float)
@@ -157,8 +167,14 @@ class Atmosphere:
                     ib = np.searchsorted(wavelength_bins, lam) - 1
                     ib = 0 if ib < 0 else (n_bins-1 if ib >= n_bins else ib)
                     spectral[idx + (ib,)] += e
+        self._spectral_source_function = spectral
         return spectral
     
+    def spectral_source_function(self, wavelength_bins):
+        """Return spectral source function, computing if necessary."""
+        if self._spectral_source_function is None:
+            return self.compute_source_function_spectral(wavelength_bins)
+        return self._spectral_source_function
 
     def cell_size(self):
         return self._cell_size
@@ -249,7 +265,7 @@ class PhotonPacket:
         return self._lambda
 
 class Star:
-    def __init__(self, model= 'Sun',T=None, R=None, D=None, direction= (0, 0)):
+    def __init__(self, model= None,T=None, R=None, D=None, direction= (0, 0)):
         if model == 'Sun':
             self.T = 5778  # Kelvin
             self.R = 6.96e8  # meters
@@ -272,11 +288,13 @@ class Star:
         x = np.asarray(x, dtype=float)
         out = np.empty_like(x)
         small = x < 1e-6
-        out[small]  = x[small]**2
-        out[~small] = x[~small]**3 / (np.exp(x[~small]) - 1.0)
+        """ out[small]  = x[small]**2
+        out[~small] = x[~small]**3 / (np.exp(x[~small]) - 1.0) """
+        out[small] = x[small]
+        out[~small] = x[~small] ** 2 / (np.exp(x[~small]) - 1.0)
         return out  # unnormalized, fine for rejection
     
-    def sample_blackbody_x(self, T, N, x_max=20.0, y_max=1.6):
+    def sample_blackbody_x(self, N, x_max=20.0, y_max=1.6):
         """
         Rejection sample x ~ energy PDF. Returns N samples of x.
         NOTE: we track the *number accepted*, not the number of batches.
@@ -296,7 +314,7 @@ class Star:
         return np.concatenate(kept, axis=0)
     
     def lambda_sample(self, N):
-        x_samples = self.sample_blackbody_x(self.T, N)
+        x_samples = self.sample_blackbody_x(N)
         lam_samples = ((h*c) / k_B).value / (self.T * x_samples)  # store if you need lambda-dependent opacities
         return lam_samples
     
@@ -308,7 +326,10 @@ class Star:
         """
 
         lam_samples = self.lambda_sample(N)
-
+        N_blue = len(lam_samples[(lam_samples < 495e-9)& (lam_samples >= 380e-9)])
+        N_green = len(lam_samples[(lam_samples < 570e-9)& (lam_samples >= 495e-9)])
+        N_red = len(lam_samples[(lam_samples < 700e-9)& (lam_samples >= 570e-9)])
+        print(f"Created {N} photon packets: {N_blue} blue, {N_green} green, {N_red} red.")
         if use_physical_units:
             # flux at distance D (W/m^2)
             flux = self._luminosity / (4.0 * np.pi * (self.D ** 2))
@@ -376,7 +397,7 @@ class Observer:
         # per-bin efficiency (sensitivity) for R,G,B order (len = 3)
         if spectral_efficiency is None:
             # default simple eye-like sensitives (relative)
-            self.spectral_efficiency = np.array([0.6, 1.0, 0.9])
+            self.spectral_efficiency = np.array([0.353, 1.0, 0.075])
         else:
             self.spectral_efficiency = np.asarray(spectral_efficiency, dtype=float)
 
@@ -406,13 +427,13 @@ class Observer:
         return np.arctan(np.clip(self.star.R/ self.star.D, 0.0, 1.0))
 
     # -----------------------------------------------------------
-    def compute_length_in_cells(self, initial_position, depth, direction, source_function_spectral, alpha):
+    def integrate_spectral_lum(self, initial_position, depth, direction, spectral_source_function, alpha):
         """
-        Compute the length of the ray in each cell it traverses.
+        Computes the spectral luminosity along a ray.
         initial_position: (x, y, z) coordinates of the starting point
-        depth: distance to propagate
+        depth: distance to integrate along the ray
         direction: (dx, dy, dz) direction vector
-        Returns: 3D array of lengths in each cell
+        Returns: 3D array of spectral luminosity per bin (blue, green, red)
         """
         length_in_cell = np.zeros((self.atm.shape())+ (self._n_bins,), dtype=float)
 
@@ -430,9 +451,9 @@ class Observer:
         Xcell, Ycell, Zcell = np.floor(initial_position/self.atm.cell_size()).astype(int)
 
         while self.atm.in_box([Xcell, Ycell, Zcell], index=True) and t_curr < depth: 
-            t_next = min(tMaxX, tMaxY, tMaxZ)
-            delta = min(t_next, depth) - t_curr
-            length_in_cell[Xcell, Ycell, Zcell] += alpha * delta * source_function_spectral[Xcell, Ycell, Zcell] * np.exp(-alpha * (depth - t_curr))
+            t_next = min(tMaxX, tMaxY, tMaxZ) # distance to next boundary crossing (from initial position)
+            delta = min(t_next, depth) - t_curr # length traveled in this cell
+            length_in_cell[Xcell, Ycell, Zcell] += alpha * delta * spectral_source_function[Xcell, Ycell, Zcell] * np.exp(-alpha * (depth - t_curr))
 
             if t_next == tMaxX:
                 tMaxX += tDeltaX
@@ -469,7 +490,7 @@ class Observer:
         sigma = sigma_prefactor / (np.array(lam_center) ** 4)
         alpha = sigma * rayleigh_n 
 
-        source_function_spectral = self.atm.source_function_spectral(edges)
+        spectral_source_function = self.atm.spectral_source_function(edges)
 
         # loop pixels
         for j in range(self.ny):
@@ -499,7 +520,7 @@ class Observer:
                 depth = self.atm.distance_to_boundary(self.position, dir_vec)
                 if depth <= 0:
                     continue
-                pixel_spectral = self.compute_length_in_cells(self.position, depth, dir_vec, source_function_spectral, alpha)
+                pixel_spectral = self.integrate_spectral_lum(self.position, depth, dir_vec, spectral_source_function, alpha)
                 
                 if include_star:
                     
@@ -510,7 +531,7 @@ class Observer:
                     cos_angle = np.dot(dir_vec, star_dir)
                     angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
                     #print("Stellar angular radius (rad):", self.star_angular_radius())
-                    if angle < self.star_angular_radius():
+                    if angle < self.star_angular_radius()*2:
                         print(f"Pixel ({i}, {j}) includes star at angle {angle*180/np.pi} deg")
                         # angular size and solid angle of the star
                         alpha_star = self.star_angular_radius()
@@ -549,14 +570,14 @@ class Observer:
         # normalize per channel with efficiency
         rgb = np.zeros_like(img)
         for c in range(3):
-            rgb[:, :, c] = img[:, :, 2 - c] * self.spectral_efficiency[c]
+            rgb[:, :, c] = img[:, :, 2-c] * self.spectral_efficiency[c]
         # normalize to max
         max_val = np.max(rgb)
         if max_val > 0:
             rgb /= max_val
         plt.figure(figsize=(8, 8))
-        extent = [360,0, 180, 0]
-        plt.imshow(rgb, origin='upper', extent=extent)
+        extent = [-180, 180, 180, 0]
+        plt.imshow(rgb, extent=extent)
         #plt.axis('off')
         plt.savefig('./figures/observer_output.png')
         plt.show()
@@ -578,7 +599,7 @@ class Simulation:
                     (self.atmosphere.shape()[2] * self.atmosphere.cell_size())/2]
         self.observer = Observer( self.atmosphere, self.star, 
                             position=obs_pos, 
-                            image_size=(500, 500), fov_deg=(30, 30), 
+                            image_size=(200, 220), fov_deg=(30, 30), 
                             up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0])
                         )
 
@@ -599,10 +620,22 @@ class Simulation:
                     photon.move()
                     break
 
-    def plot(self, rays=False):
+    def plot(self, band = None, rays=False):
+        if band is None:
+            luminosity = self.atmosphere.source_function_integrated()
+        else:
+            spectral_source_func = self.atmosphere.spectral_source_function(self.observer.spectral_edges)
+            if band == 'red':
+                luminosity = spectral_source_func[:,:,:,2]
+            elif band == 'green':
+                luminosity = spectral_source_func[:,:,:,1]
+            elif band == 'blue':
+                luminosity = spectral_source_func[:,:,:,0]
+            else:
+                raise ValueError("Band must be one of 'red', 'green', 'blue', or None for total luminosity.")
 
-        norm = colors.Normalize(vmin=np.min(self.atmosphere.source_function_integrated()), vmax=np.max(self.atmosphere.source_function_integrated()))
-        facecolors = cm.rainbow_r(norm(self.atmosphere.source_function_integrated()))
+        norm = colors.Normalize(vmin=np.min(luminosity), vmax=np.max(luminosity))
+        facecolors = cm.rainbow_r(norm(luminosity))
         nx, ny, nz = self.atmosphere.shape()
         cell_size = self.atmosphere.cell_size()
 
@@ -613,7 +646,7 @@ class Simulation:
         X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
         plt.figure()
         ax = plt.axes(projection='3d')
-        ax.voxels(X, Y, Z, self.atmosphere.source_function_integrated() > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
+        ax.voxels(X, Y, Z, luminosity > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
         if rays:
             for i in range(self.N):
                 ax.plot(
@@ -628,8 +661,11 @@ class Simulation:
         ax.set_xlim(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size())
         ax.set_ylim(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size())
         ax.set_zlim(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size())
-        plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Intensity')
-        plt.savefig('./figures/simulation_output.png')
+        plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='Luminosity Deposited')
+        if band is None:
+            band = 'total'
+        plt.title(f'{band} luminosity deposited')
+        plt.savefig(f'./figures/simulation_output_{band}.png')
         plt.show()
 
     def observe(self):
@@ -640,15 +676,20 @@ class Simulation:
 
 
 if __name__ == "__main__":
-    boxsize = (10, 10, 10)
-    cell_size = 5e3
+    boxsize = (50, 50, 10) # in number of cells
+    cell_size = 1e4 # in meters: 10 km
 
-    N = 10000
-    star = Star(model='Sun', direction=(np.pi/10, np.pi/2))
+    N = 10000 # number of photon packets
+    star = Star(model='Sun', direction=(np.pi/6, 0))
     atm = Atmosphere(shape = boxsize, cell_size=cell_size)
     sim = Simulation(atm, star, N)
     sim.run()
-    sim.plot(rays=False)
+    sim.plot()
+
+    sim.plot(band='blue')
+    sim.plot(band='green')
+    sim.plot(band='red')
+
     sim.observe()
 
     
