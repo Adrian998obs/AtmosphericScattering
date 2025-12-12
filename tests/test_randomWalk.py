@@ -38,7 +38,7 @@ def test_mfp():
     lengths = np.array([])
     N = 10000
     for _ in range(N):
-        photon = simulation.PhotonPacket(position=np.array([0,0,5.5]), wavelength=800e-9)
+        photon = simulation.PhotonPacket(position=np.array([0,0,5.5]), wavelength=400e-9)
         photon.random_walk()
         length = photon.optical_length()
         lengths = np.append(lengths, length)

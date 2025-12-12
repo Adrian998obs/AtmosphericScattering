@@ -25,13 +25,16 @@ def test_star_spectrum():
     star = simulation.Star(T=T, R=R, D=D)
 
     N = 10000
-    lambda_samples = star.lambda_sample(N)  # en mètres
-    N_blue = len(lambda_samples[(lambda_samples < 495e-9)& (lambda_samples >= 380e-9)])
-    N_green = len(lambda_samples[(lambda_samples < 570e-9)& (lambda_samples >= 495e-9)])
-    N_red = len(lambda_samples[(lambda_samples < 700e-9)& (lambda_samples >= 570e-9)])
+    lam_band_nm = (380, 700)  # Visible range in nm
+    x_samples = star.sample_blackbody_x(N, x_max=20.0, y_max=1.6, lam_band_m=(lam_band_nm[0]*1e-9, lam_band_nm[1]*1e-9))
+    x_samples = np.clip(x_samples, 1e-12, None)
+    lam_samples = ((h*c) / k_B) / (star.T * x_samples)
+    N_blue = len(lam_samples[(lam_samples < 495e-9)& (lam_samples >= 380e-9)])
+    N_green = len(lam_samples[(lam_samples < 570e-9)& (lam_samples >= 495e-9)])
+    N_red = len(lam_samples[(lam_samples < 700e-9)& (lam_samples >= 570e-9)])
     print(f"Created {N} photon packets: {N_blue} blue, {N_green} green, {N_red} red.")
     # grilles et spectre théorique (en m)
-    l = np.linspace(1e-9, 3e-6, 1000)  # m
+    l = np.linspace(lam_band_nm[0]*1e-9, lam_band_nm[1]*1e-9,  1000)  # m
     B_lambda = (2*h*c**2) / (l**5) * 1.0 / (np.exp((h*c) / (l*k_B*star.T)) - 1.0)
 
     # normalisations (PDF par m)
@@ -45,8 +48,8 @@ def test_star_spectrum():
     B_photon_pdf_per_nm = B_photon_pdf_m * 1e-9
 
     # histogramme des échantillons en nm
-    lambda_samples_nm = lambda_samples * 1e9
-    bins = np.linspace(lambda_samples_nm.min(), lambda_samples_nm.max(), 2000)
+    lambda_samples_nm = lam_samples * 1e9
+    bins = np.linspace(lambda_samples_nm.min(), lambda_samples_nm.max(), 100)
     counts, edges = np.histogram(lambda_samples_nm, bins=bins, density=True)
     bin_centers = 0.5 * (edges[:-1] + edges[1:])
 
@@ -64,7 +67,17 @@ def test_star_spectrum():
     plt.savefig('./figures/test_star_spectrum.png')
     plt.show()
 
+def test_total_luminosity():
+    star = simulation.Star(model='Sun')
+    luminosity_received = star.luminosity() / (4 * np.pi * star.D**2) 
+    N_photons = 100000
+    photons = star.createPhotonPackets([0,0,0]*N_photons,N_photons, lam_band_nm=(1,1e5), use_physical_units=True, area=1.0, dt=1.0)
+
+    total_energy = np.sum([photon.luminosity() for photon in photons])
+    assert np.isclose(total_energy, luminosity_received, rtol=1e-2), f"Total photon luminosity {total_energy} does not match star luminosity {luminosity_received}"
+    
 if __name__ == "__main__":
     test_star_luminosity()
     test_star_spectrum()
+    test_total_luminosity()
     print("Star luminosity and spectrum tests completed successfully.")

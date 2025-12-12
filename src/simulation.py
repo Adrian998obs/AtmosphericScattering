@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -165,7 +166,9 @@ class Atmosphere:
             if ev:
                 for (lam, e) in ev:
                     ib = np.searchsorted(wavelength_bins, lam) - 1
-                    ib = 0 if ib < 0 else (n_bins-1 if ib >= n_bins else ib)
+                    if ib < 0 or ib >= n_bins:
+                        continue
+                    #ib = 0 if ib < 0 else (n_bins-1 if ib >= n_bins else ib)
                     spectral[idx + (ib,)] += e
         self._spectral_source_function = spectral
         return spectral
@@ -185,7 +188,7 @@ class Atmosphere:
 
 class PhotonPacket:
 
-    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 2.5e25, initial_theta=None, initial_phi=None):
+    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 1.4e24, initial_theta=None, initial_phi=None):
         self._position = position
         self._lambda = wavelength  # in meters
         self._luminosity = luminosity  # in Watts
@@ -288,8 +291,6 @@ class Star:
         x = np.asarray(x, dtype=float)
         out = np.empty_like(x)
         small = x < 1e-6
-        """ out[small]  = x[small]**2
-        out[~small] = x[~small]**3 / (np.exp(x[~small]) - 1.0) """
         out[small] = x[small]
         out[~small] = x[~small] ** 2 / (np.exp(x[~small]) - 1.0)
         return out  # unnormalized, fine for rejection
@@ -352,8 +353,8 @@ class Star:
     
     def createPhotonPackets(self, initial, N, use_physical_units=True, 
                             area=1.0, dt=1.0,
-                            lam_band_nm=(1e-5, 1_000_000.0)):            # 1 nm – 1 mm
-        lam_band_m = (lam_band_nm[0]*1e-9, lam_band_nm[1]*1e-9)
+                            lam_band_m=(1e-9, 1_000_000.0e-9)):            # 1 nm – 1 mm
+        #lam_band_m = (lam_band_nm[0]*1e-9, lam_band_nm[1]*1e-9)
     
         x_samples = self.sample_blackbody_x(N, x_max=20.0, y_max=1.6, lam_band_m=lam_band_m)
         x_samples = np.clip(x_samples, 1e-12, None)
@@ -361,9 +362,10 @@ class Star:
     
         if use_physical_units:
             lam_grid = np.linspace(lam_band_m[0], lam_band_m[1], 5000)
-            F = self.irradiance_F_lambda(lam_grid)
-            band_power_per_area = np.trapezoid(F, lam_grid)
+            F = self.irradiance_F_lambda(lam_grid) # W/m²/m spectral flux 
+            band_power_per_area = np.trapezoid(F, lam_grid) # W/m² integrated over band
             total_band_energy   = band_power_per_area * area * dt
+            print(f"Total band energy emitted over area {area} m² in dt={dt} s: {total_band_energy:.3e} J")
             weight = total_band_energy / N
         else:
             weight = 1.0
@@ -396,7 +398,7 @@ class Observer:
                  forward=np.array([0.0, 0.0, 1.0]),
                  # spectral settings: bin edges in meters and per-bin efficiency
                  spectral_edges=None,
-                 spectral_efficiency=None):
+                 spectral_efficiency=np.array([0.5, 0.9, 0.7])):
         self.atm = atmosphere
         self.star = star
         self.position = np.array(position, dtype=float)
@@ -407,7 +409,7 @@ class Observer:
         # camera orientation
         self.forward = forward / np.linalg.norm(forward)
         self.up = up / np.linalg.norm(up)
-        self.right = np.cross(self.forward, self.up)
+        self.right = np.cross(self.up, self.forward)
         self.right /= np.linalg.norm(self.right)
         self.up = np.cross(self.right, self.forward)
         self.up /= np.linalg.norm(self.up)
@@ -424,11 +426,8 @@ class Observer:
             self.spectral_edges = np.asarray(spectral_edges, dtype=float)
 
         # per-bin efficiency (sensitivity) for R,G,B order (len = 3)
-        if spectral_efficiency is None:
-            # default simple eye-like sensitives (relative)
-            self.spectral_efficiency = np.array([0.353, 1.0, 0.075])
-        else:
-            self.spectral_efficiency = np.asarray(spectral_efficiency, dtype=float)
+        
+        self.spectral_efficiency = np.asarray(spectral_efficiency, dtype=float)
 
     # -----------------------------------------------------------
     def ray_direction(self, i, j):
@@ -520,8 +519,13 @@ class Observer:
         lam_center = [0.5 * (edges[b] + edges[b+1]) for b in range(self._n_bins)]
         sigma = sigma_prefactor / (np.array(lam_center) ** 4)
         alpha = sigma * rayleigh_n 
+        
+        if os.path.exists('./data/simulation_output.npz'):
+            data = np.load('./data/simulation_output.npz')
 
-        spectral_source_function = self.atm.spectral_source_function(edges)
+            spectral_source_function = data['spectral_source_function']
+        else:
+            spectral_source_function = self.atm.spectral_source_function(edges)
 
         # loop pixels
         for j in range(self.ny):
@@ -537,7 +541,7 @@ class Observer:
                 elif projection == 'pinhole':
                     dir_vec = self.pixels_to_angles(i, j, coord='cartesian')
 
-                else:  # fisheye hemisphere equidistant
+                elif projection == 'fisheye':  # fisheye hemisphere equidistant
                     dx = (i - cx) / Rpix
                     dy = (j - cy) / Rpix
                     r = np.hypot(dx, dy)
@@ -590,34 +594,69 @@ class Observer:
                         for b in range(self._n_bins):
                             transmittance_star = np.exp(-alpha[b] * depth)
                             F_b = L_b[b] / (4.0 * np.pi * (self.star.D ** 2))
-                            pixel_spectral[b] += F_b * frac * transmittance_star
+                            pixel_spectral[b] += F_b * transmittance_star #F_b * frac * transmittance_star
                 
                 img[j, i, :] = pixel_spectral
 
         return img
     
-    def show_truecolor(self, img):
+    def overlay_fisheye_grid(self, ax, nx, ny, rings_deg=(15, 30, 45, 60, 75)):
+                cx = (nx - 1) / 2.0
+                cy = (ny - 1) / 2.0
+                R  = min(nx, ny) / 2.0
+
+                # Anneaux de theta (θ = r * 90° -> r = θ/90)
+                for deg in rings_deg:
+                    r = (deg / 90.0) * R
+                    circle = plt.Circle((cx, cy), r, color='w', fill=False, alpha=0.3, linewidth=1)
+                    ax.add_patch(circle)
+                    ax.text(cx + r + 4, cy, f'{deg}°', color='w', va='center', fontsize=8)
+
+                    # Horizon (90°)
+                    horizon = plt.Circle((cx, cy), R, color='w', fill=False, alpha=0.6, linewidth=1.5)
+                    ax.add_patch(horizon)
+                    ax.text(cx + R + 6, cy, '90° (horizon)', color='w', va='center', fontsize=8)
+
+                    # Cardinaux (φ)
+                    ax.text(cx + R*0.95, cy, 'E (φ=0)', color='w', ha='left', va='center', fontsize=8)
+                    ax.text(cx - R*0.95, cy, 'W (φ=±π)', color='w', ha='right', va='center', fontsize=8)
+                    ax.text(cx, cy - R*0.95, 'N (φ=-π/2)', color='w', ha='center', va='top', fontsize=8)
+                    ax.text(cx, cy + R*0.95, 'S (φ=+π/2)', color='w', ha='center', va='bottom', fontsize=8)
+    
+    def show_truecolor(self, img, projection='pinhole'):
         """Display rendered image as truecolor using spectral sensitivities."""
         # normalize per channel with efficiency
         rgb = np.zeros_like(img)
         for c in range(3):
             rgb[:, :, c] = img[:, :, 2-c] * self.spectral_efficiency[c]
-        # normalize to max
-        max_val = np.max(rgb)
-        if max_val > 0:
-            rgb /= max_val
+        # clip robuste par canal, puis normalisation
+        for c in range(3):
+            m = np.percentile(rgb[:, :, c], 99.0)
+            if m > 0:
+                rgb[:, :, c] = np.clip(rgb[:, :, c], 0.0, m) / m
+
+        # afficher (retirer vmin/vmax qui ne servent pas en RGB)
         plt.figure(figsize=(8, 8))
         extent = [-180, 180, 180, 0]
-        plt.imshow(rgb, extent=extent)
-        #plt.axis('off')
+        plt.imshow(np.clip(rgb, 0.0, 1.0), extent=extent, interpolation=None)
+        if projection == 'fisheye':
+            plt.imshow(np.clip(rgb, 0.0, 1.0), interpolation=None)
+            ax = plt.gca()
+            self.overlay_fisheye_grid(ax, self.nx, self.ny)
+        else:
+            plt.imshow(np.clip(rgb, 0.0, 1.0), extent=extent, interpolation=None)
+            plt.xlabel('Azimuth φ (degrees)')
+            plt.ylabel('Elevation θ (degrees)')
+            plt.title('Observer Truecolor Image')
+            
         plt.savefig('./figures/observer_output.png')
         plt.show()
 
 
 class Simulation:
-    def __init__(self, atmosphere, star, N=10):
+    def __init__(self, atmosphere, star, observer, N=10):
 
-        
+        self.observer = observer
         self.atmosphere = atmosphere
         self.star = star
         self.N = N
@@ -633,18 +672,10 @@ class Simulation:
         self.photons = self.star.createPhotonPackets(initial, self.N,
                                                      use_physical_units=True,
                                                      area=area, dt=dt,
-                                                     lam_band_nm=(1e-5, 1_000_000.0))
+                                                     lam_band_m=(self.observer.spectral_edges[0], self.observer.spectral_edges[-1]))
+        
 
-        obs_pos = [(self.atmosphere.shape()[0] * self.atmosphere.cell_size())/2, 
-                   (self.atmosphere.shape()[1] * self.atmosphere.cell_size())/2,
-                    (self.atmosphere.shape()[2] * self.atmosphere.cell_size())/2]
-        self.observer = Observer( self.atmosphere, self.star, 
-                            position=obs_pos, 
-                            image_size=(200, 220), fov_deg=(30, 30), 
-                            up=np.array([0.0, 1.0, 0.0]), forward=np.array([0.0, 0.0, 1.0])
-                        )
-
-    def run(self):
+    def run(self, save_output=False):
         
         for photon in self.photons:
             while photon.luminosity() > photon.luminosity_threshold() and self.atmosphere.in_box(photon.position()):
@@ -660,12 +691,19 @@ class Simulation:
                     photon.set_optical_length(L)
                     photon.move()
                     break
+        if save_output:
+            np.savez('./data/simulation_output.npz', spectral_source_function=self.atmosphere.spectral_source_function(self.observer.spectral_edges))
 
     def plot(self, band = None, rays=False):
         if band is None:
             luminosity = self.atmosphere.source_function_integrated()
         else:
-            spectral_source_func = self.atmosphere.spectral_source_function(self.observer.spectral_edges)
+            if os.path.exists('./data/simulation_output.npz'):
+                data = np.load('./data/simulation_output.npz')
+                spectral_source_func= data['spectral_source_function']
+            else:
+                spectral_source_func = self.atmosphere.spectral_source_function(self.observer.spectral_edges)
+
             if band == 'red':
                 luminosity = spectral_source_func[:,:,:,2]
             elif band == 'green':
@@ -687,7 +725,7 @@ class Simulation:
         X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
         plt.figure()
         ax = plt.axes(projection='3d')
-        ax.voxels(X, Y, Z, luminosity > 0, facecolors=facecolors, edgecolor='k', alpha=0.5)
+        ax.voxels(X, Y, Z, luminosity > 0, facecolors=facecolors, edgecolor='k', alpha=0.2)
         if rays:
             for i in range(self.N):
                 ax.plot(
@@ -709,29 +747,42 @@ class Simulation:
         plt.savefig(f'./figures/simulation_output_{band}.png')
         plt.show()
 
-    def observe(self):
+    def observe(self, projection='fisheye'):
 
-        img = self.observer.render(include_star=True, projection='pinhole')
+        img = self.observer.render(include_star=True, projection=projection)
 
-        self.observer.show_truecolor(img)
+        self.observer.show_truecolor(img, projection=projection)
 
 
 if __name__ == "__main__":
     boxsize = (50, 50, 10) # in number of cells
     cell_size = 1e4 # in meters: 10 km
 
-    N = 10000 # number of photon packets
+    N = 1000000 # number of photon packets
     star = Star(model='Sun', direction=(np.pi/6, 0))
     atm = Atmosphere(shape = boxsize, cell_size=cell_size)
-    sim = Simulation(atm, star, N)
-    sim.run()
-    sim.plot()
+    
+    obs_pos = [(atm.shape()[0] * atm.cell_size())/2, 
+                   (atm.shape()[1] * atm.cell_size())/2,
+                   0]
+    image_size = (720, 720)
+    spectral_edges = [380e-9, 495e-9, 570e-9, 700e-9]  # visible spectrum in meters
+    spectral_efficiency = [0.5, 0.9, 0.9]  # R, G, B sensitivities
+    observer = Observer( atm, star, 
+                        position=obs_pos, 
+                        image_size=image_size, 
+                        spectral_efficiency=spectral_efficiency, 
+                        spectral_edges=spectral_edges)
 
-    sim.plot(band='blue')
+    sim = Simulation(atm, star, observer, N)
+    #sim.run(save_output=True)
+    #sim.plot()
+
+    """ sim.plot(band='blue')
     sim.plot(band='green')
-    sim.plot(band='red')
+    sim.plot(band='red') """
 
-    sim.observe()
+    sim.observe(projection='fisheye')
 
     
 
