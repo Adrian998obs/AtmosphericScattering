@@ -30,10 +30,9 @@ def test_RW():
     ax.set_ylim(0, atmosphere.shape()[1]*cell_size)
     ax.set_zlim(0, atmosphere.shape()[2]*cell_size)
     plt.savefig('./figures/test_randomWalk.png')
-    plt.close()
+    plt.show()
 
 def test_mfp():
-
     """Test the mean free path calculation and luminosity deposition."""
     lengths = np.array([])
     N = 10000

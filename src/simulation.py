@@ -188,7 +188,7 @@ class Atmosphere:
 
 class PhotonPacket:
 
-    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 1.4e24, initial_theta=None, initial_phi=None):
+    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 1.4e25, initial_theta=None, initial_phi=None):
         self._position = position
         self._lambda = wavelength  # in meters
         self._luminosity = luminosity  # in Watts
@@ -291,8 +291,8 @@ class Star:
         x = np.asarray(x, dtype=float)
         out = np.empty_like(x)
         small = x < 1e-6
-        out[small] = x[small]
-        out[~small] = x[~small] ** 2 / (np.exp(x[~small]) - 1.0)
+        out[small] = x[small] ** 2
+        out[~small] = x[~small] ** 3 / (np.exp(x[~small]) - 1.0)
         return out  # unnormalized, fine for rejection
 
     def sample_blackbody_x(self, N, x_max=20.0, y_max=1.6, lam_band_m=None):
@@ -365,7 +365,7 @@ class Star:
             F = self.irradiance_F_lambda(lam_grid) # W/m²/m spectral flux 
             band_power_per_area = np.trapezoid(F, lam_grid) # W/m² integrated over band
             total_band_energy   = band_power_per_area * area * dt
-            print(f"Total band energy emitted over area {area} m² in dt={dt} s: {total_band_energy:.3e} J")
+            print(f"Total flux received from star in band {lam_band_m[0]*1e9:.1f}nm-{lam_band_m[1]*1e9:.1f}nm: {band_power_per_area:.1f} W/m²")
             weight = total_band_energy / N
         else:
             weight = 1.0
@@ -381,6 +381,9 @@ class Star:
         return photons
 
     def direction(self):
+        """
+        Return the star direction as (theta, phi) in radians.
+        """
         return self._direction
     
     def luminosity(self):
@@ -499,7 +502,7 @@ class Observer:
 
         return np.sum(length_in_cell, axis = (0,1,2))
     
-    def render(self, projection='fisheye', radius_ratio=1.0, include_star=True, rayleigh_n=2.5e25):
+    def render(self, projection='fisheye', radius_ratio=1.0, include_star=True, rayleigh_n=1.4e25, use_saved_data=True):
         """
         Render sky with discrete RT along rays.
         Returns numpy array (ny, nx, 3) with channels in order [B, G, R].
@@ -520,7 +523,7 @@ class Observer:
         sigma = sigma_prefactor / (np.array(lam_center) ** 4)
         alpha = sigma * rayleigh_n 
         
-        if os.path.exists('./data/simulation_output.npz'):
+        if os.path.exists('./data/simulation_output.npz') and use_saved_data:
             data = np.load('./data/simulation_output.npz')
 
             spectral_source_function = data['spectral_source_function']
@@ -548,7 +551,7 @@ class Observer:
                     if r > 1.0:
                         continue
                     theta = r * (np.pi/2.0)
-                    phi = np.arctan2(dy, dx)
+                    phi = np.arctan2(-dy, dx)
                     dir_vec = np.cos(theta)*self.forward + np.sin(theta)*(np.cos(phi)*self.right + np.sin(phi)*self.up)
                     dir_vec /= np.linalg.norm(dir_vec)
 
@@ -620,8 +623,8 @@ class Observer:
                     # Cardinaux (φ)
                     ax.text(cx + R*0.95, cy, 'E (φ=0)', color='w', ha='left', va='center', fontsize=8)
                     ax.text(cx - R*0.95, cy, 'W (φ=±π)', color='w', ha='right', va='center', fontsize=8)
-                    ax.text(cx, cy - R*0.95, 'N (φ=-π/2)', color='w', ha='center', va='top', fontsize=8)
-                    ax.text(cx, cy + R*0.95, 'S (φ=+π/2)', color='w', ha='center', va='bottom', fontsize=8)
+                    ax.text(cx, cy - R*0.95, 'N (φ=+π/2)', color='w', ha='center', va='top', fontsize=8)
+                    ax.text(cx, cy + R*0.95, 'S (φ=-π/2)', color='w', ha='center', va='bottom', fontsize=8)
     
     def show_truecolor(self, img, projection='pinhole'):
         """Display rendered image as truecolor using spectral sensitivities."""
@@ -630,15 +633,13 @@ class Observer:
         for c in range(3):
             rgb[:, :, c] = img[:, :, 2-c] * self.spectral_efficiency[c]
         # clip robuste par canal, puis normalisation
-        for c in range(3):
-            m = np.percentile(rgb[:, :, c], 99.0)
-            if m > 0:
-                rgb[:, :, c] = np.clip(rgb[:, :, c], 0.0, m) / m
+        
+        m = np.percentile(rgb, 99.0)
+        if m > 0:
+            rgb = rgb / m
 
-        # afficher (retirer vmin/vmax qui ne servent pas en RGB)
         plt.figure(figsize=(8, 8))
         extent = [-180, 180, 180, 0]
-        plt.imshow(np.clip(rgb, 0.0, 1.0), extent=extent, interpolation=None)
         if projection == 'fisheye':
             plt.imshow(np.clip(rgb, 0.0, 1.0), interpolation=None)
             ax = plt.gca()
@@ -654,31 +655,101 @@ class Observer:
 
 
 class Simulation:
-    def __init__(self, atmosphere, star, observer, N=10):
+    def __init__(self, atm=None, star=None, obs=None, N=10):
 
-        self.observer = observer
-        self.atmosphere = atmosphere
+        self.observer = obs
+        self.atmosphere = atm
         self.star = star
-        self.N = N
-        initial = np.array([np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N),
-                            np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N),
-                            (self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)*np.ones(N)]).T
         
+        """ initial = np.array([np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N),
+                            np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N),
+                            (self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)*np.ones(N)]).T """
+        initial, area = self.initial_positions(N)
+        self.N = initial.shape[0]
+        print("Initial photon positions shape:", initial.shape)
         nx, ny, _ = self.atmosphere.shape()
         dx = self.atmosphere.cell_size()
-        area = (nx*dx) * (ny*dx)   # top surface area
+        #area = (nx*dx) * (ny*dx)   # top surface area
         dt   = 1.0                 # s
 
         self.photons = self.star.createPhotonPackets(initial, self.N,
                                                      use_physical_units=True,
                                                      area=area, dt=dt,
                                                      lam_band_m=(self.observer.spectral_edges[0], self.observer.spectral_edges[-1]))
+        print("Number of photon packets created:", len(self.photons))
+    def initial_positions(self, N):
+        dir = self.star.direction()
+        theta_star, phi_star = dir
+        faceR = (theta_star > 0) & (theta_star < np.pi) & (((phi_star > -np.pi/2) & (phi_star < 0))| (phi_star < np.pi/2))
+        faceL = (theta_star > 0) & (theta_star < np.pi) & (((phi_star > np.pi/2) & (phi_star < 3*np.pi/2)) | ((phi_star < -np.pi/2) & (phi_star > -3*np.pi/2)))
+        faceFront = (theta_star > 0 ) & (theta_star < np.pi) & (phi_star > 0) & (phi_star < np.pi)
+        faceBack = (theta_star > 0 ) & (theta_star < np.pi) & (phi_star < 0) & (phi_star > -np.pi)
+        faceTop = (theta_star < np.pi/2)
+        faceBottom = False
+        faces = [faceR, faceL, faceFront, faceBack, faceTop, faceBottom]
+        n_faces = sum(faces)
+        print("Number of illuminated faces:", n_faces, "faces:", faces)
+        areas = [self.atmosphere.shape()[1] * self.atmosphere.cell_size() * self.atmosphere.shape()[2] * self.atmosphere.cell_size(),
+                 self.atmosphere.shape()[1] * self.atmosphere.cell_size() * self.atmosphere.shape()[2] * self.atmosphere.cell_size(),
+                 self.atmosphere.shape()[0] * self.atmosphere.cell_size() * self.atmosphere.shape()[2] * self.atmosphere.cell_size(),
+                 self.atmosphere.shape()[0] * self.atmosphere.cell_size() * self.atmosphere.shape()[2] * self.atmosphere.cell_size(),
+                 self.atmosphere.shape()[0] * self.atmosphere.cell_size() * self.atmosphere.shape()[1] * self.atmosphere.cell_size(),
+                 self.atmosphere.shape()[0] * self.atmosphere.cell_size() * self.atmosphere.shape()[1] * self.atmosphere.cell_size()]
+        total_area = sum([areas[i] for i in range(6) if faces[i]])
+        initial = np.empty((0,3))
+
         
+        for i, face in enumerate(faces):
+            if face:
+                if i == 0:  # Right face
+                    N_face = round(N * (areas[0] / total_area))
+                    x = np.full(N_face, self.atmosphere.shape()[0] * self.atmosphere.cell_size()- 0.001)
+                    y = np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N_face)
+                    z = np.random.uniform(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size(), N_face)
+                elif i == 1:  # Left face
+                    N_face = round(N * (areas[1] / total_area))
+                    x = np.zeros(N_face) + 0.001
+                    y = np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N_face)
+                    z = np.random.uniform(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size(), N_face)
+                elif i == 2:  # Front face
+                    N_face = round(N * (areas[2] / total_area))
+                    x = np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N_face)
+                    y = np.full(N_face, self.atmosphere.shape()[1] * self.atmosphere.cell_size() - 0.001)
+                    z = np.random.uniform(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size(), N_face)
+                elif i == 3:  # Back face
+                    N_face = round(N * (areas[3] / total_area))
+                    x = np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N_face)
+                    y = np.zeros(N_face) + 0.001
+                    z = np.random.uniform(0, self.atmosphere.shape()[2] * self.atmosphere.cell_size(), N_face)
+                elif i == 4:  # Top face
+                    N_face = round(N * (areas[4] / total_area))
+                    x = np.random.uniform(0, self.atmosphere.shape()[0] * self.atmosphere.cell_size(), N_face)
+                    y = np.random.uniform(0, self.atmosphere.shape()[1] * self.atmosphere.cell_size(), N_face)
+                    z = np.full(N_face, self.atmosphere.shape()[2] * self.atmosphere.cell_size() - 0.001)
+                initial =  np.vstack((initial, np.column_stack((x, y, z))))
+        return initial, total_area
 
     def run(self, save_output=False):
-        
+        count=-1
+        tau_grid = [[], [], []]
+        count_blue = -1
+        count_green = -1
+        count_red = -1
+        blue = 0
+        green=0
+        red=0
         for photon in self.photons:
+            if photon.wavelength() > self.observer.spectral_edges[0] and photon.wavelength() < self.observer.spectral_edges[1]:
+                    
+                    blue +=1
+            elif photon.wavelength() > self.observer.spectral_edges[1] and photon.wavelength() < self.observer.spectral_edges[2]:
+                
+                green +=1
+            elif photon.wavelength() > self.observer.spectral_edges[2] and photon.wavelength() < self.observer.spectral_edges[3]:
+                
+                red +=1
             while photon.luminosity() > photon.luminosity_threshold() and self.atmosphere.in_box(photon.position()):
+                count+=1
                 photon.random_walk()
                 tau, theta, phi = photon.get_random_walk()
                 
@@ -686,19 +757,43 @@ class Simulation:
                 self.atmosphere.deposit_luminosity(photon)
                 if self.atmosphere.in_box(photon.position() + direction_in_cartesian(theta, phi) * length):
                     photon.move()
+
+                    if photon.wavelength() > self.observer.spectral_edges[0] and photon.wavelength() < self.observer.spectral_edges[1]:
+                        tau_grid[0].append(length*photon.scattering_coefficient())
+                        count_blue +=1
+                    elif photon.wavelength() > self.observer.spectral_edges[1] and photon.wavelength() < self.observer.spectral_edges[2]:
+                        tau_grid[1].append(length*photon.scattering_coefficient())
+                        count_green +=1
+                    elif photon.wavelength() > self.observer.spectral_edges[2] and photon.wavelength() < self.observer.spectral_edges[3]:
+                        tau_grid[2].append(length*photon.scattering_coefficient())
+                        count_red +=1
                 else:
                     L = self.atmosphere.distance_to_boundary(photon.position(), direction_in_cartesian(theta, phi))
                     photon.set_optical_length(L)
                     photon.move()
+
+                    if photon.wavelength() > self.observer.spectral_edges[0] and photon.wavelength() < self.observer.spectral_edges[1]:
+                        tau_grid[0].append(length*photon.scattering_coefficient())
+                        count_blue +=1
+                    elif photon.wavelength() > self.observer.spectral_edges[1] and photon.wavelength() < self.observer.spectral_edges[2]:
+                        tau_grid[1].append(length*photon.scattering_coefficient())
+                        count_green +=1
+                    elif photon.wavelength() > self.observer.spectral_edges[2] and photon.wavelength() < self.observer.spectral_edges[3]:
+                        tau_grid[2].append(length*photon.scattering_coefficient())
+                        count_red +=1
+
                     break
+        print("Total interaction events per photon packets:", count / len(self.photons))
+        print("Number of photons per band: Blue:", count_blue/blue, "Green:", count_green/green, "Red:", count_red/red)
+        print("Average optical depth per band:", [np.mean(tau) if tau else 0 for tau in tau_grid])
         if save_output:
             np.savez('./data/simulation_output.npz', spectral_source_function=self.atmosphere.spectral_source_function(self.observer.spectral_edges))
 
-    def plot(self, band = None, rays=False):
+    def plot3D(self, band = None, rays=False, use_saved_data=True):
         if band is None:
             luminosity = self.atmosphere.source_function_integrated()
         else:
-            if os.path.exists('./data/simulation_output.npz'):
+            if use_saved_data and os.path.exists('./data/simulation_output.npz'):
                 data = np.load('./data/simulation_output.npz')
                 spectral_source_func= data['spectral_source_function']
             else:
@@ -725,7 +820,7 @@ class Simulation:
         X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
         plt.figure()
         ax = plt.axes(projection='3d')
-        ax.voxels(X, Y, Z, luminosity > 0, facecolors=facecolors, edgecolor='k', alpha=0.2)
+        ax.voxels(X, Y, Z, luminosity > 0, facecolors=facecolors, alpha=0.2)
         if rays:
             for i in range(self.N):
                 ax.plot(
@@ -747,42 +842,42 @@ class Simulation:
         plt.savefig(f'./figures/simulation_output_{band}.png')
         plt.show()
 
-    def observe(self, projection='fisheye'):
+    def observe(self, projection='fisheye', use_saved_data=True):
 
-        img = self.observer.render(include_star=True, projection=projection)
+        img = self.observer.render(include_star=True, projection=projection, use_saved_data=use_saved_data)
 
         self.observer.show_truecolor(img, projection=projection)
 
 
 if __name__ == "__main__":
-    boxsize = (50, 50, 10) # in number of cells
+    boxsize = (50, 50, 15) # in number of cells
     cell_size = 1e4 # in meters: 10 km
 
-    N = 1000000 # number of photon packets
-    star = Star(model='Sun', direction=(np.pi/6, 0))
+    N = 100_000 # number of photon packets
+    star = Star(model='Sun', direction=(np.pi/2.1, np.pi/1.1)) #direction: theta, phi
     atm = Atmosphere(shape = boxsize, cell_size=cell_size)
     
     obs_pos = [(atm.shape()[0] * atm.cell_size())/2, 
                    (atm.shape()[1] * atm.cell_size())/2,
                    0]
-    image_size = (720, 720)
+    image_size = (280, 280)
     spectral_edges = [380e-9, 495e-9, 570e-9, 700e-9]  # visible spectrum in meters
-    spectral_efficiency = [0.5, 0.9, 0.9]  # R, G, B sensitivities
+    spectral_efficiency = [0.7, 1.0, 0.5]  # R, G, B sensitivities
     observer = Observer( atm, star, 
                         position=obs_pos, 
                         image_size=image_size, 
                         spectral_efficiency=spectral_efficiency, 
                         spectral_edges=spectral_edges)
 
-    sim = Simulation(atm, star, observer, N)
-    #sim.run(save_output=True)
-    #sim.plot()
+    sim = Simulation(atm=atm, star=star, obs=observer, N=N)
+    sim.run(save_output=False)
+    sim.plot3D(use_saved_data=False)
 
     """ sim.plot(band='blue')
     sim.plot(band='green')
     sim.plot(band='red') """
 
-    sim.observe(projection='fisheye')
+    sim.observe(projection='fisheye', use_saved_data=False)
 
     
 

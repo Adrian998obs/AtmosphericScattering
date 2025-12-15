@@ -84,18 +84,26 @@ def test_plot_atmosphere():
 
 def test_plot_sourceFunction():
     """Test the plotting of the source function."""
-    atmosphere = simulation.Atmosphere(cell_size=1e4)
-    photon = simulation.PhotonPacket(position=np.array([0,0,atmosphere.shape()[0] * atmosphere.cell_size()/2]))
-    photon._theta = np.pi / 2
+    atmosphere = simulation.Atmosphere(cell_size=1e5, shape=(10,10,10))
+    photon_blue = simulation.PhotonPacket(position=np.array([0,0,atmosphere.shape()[0] * atmosphere.cell_size()/3]), wavelength=400e-9)
+    photon_blue._theta = np.pi / 2
 
-    dir = simulation.direction_in_cartesian(photon._theta, photon._phi)
-    photon._optical_length = np.min([atmosphere.distance_to_boundary(photon.position(), dir), photon.maximum_optical_depth()/photon._scattering_coefficient])
-    atmosphere.deposit_luminosity(photon)
-    photon.move()
+    dir = simulation.direction_in_cartesian(photon_blue._theta, photon_blue._phi)
+    photon_blue._optical_length = np.min([atmosphere.distance_to_boundary(photon_blue.position(), dir), photon_blue.maximum_optical_depth()/photon_blue._scattering_coefficient])
+    atmosphere.deposit_luminosity(photon_blue)
+    photon_blue.move()
+
+    photon_red = simulation.PhotonPacket(position=np.array([0,0,atmosphere.shape()[0] * atmosphere.cell_size() * 2/3]), wavelength=700e-9)
+    photon_red._theta = np.pi / 2
+    dir = simulation.direction_in_cartesian(photon_red._theta, photon_red._phi)
+    photon_red._optical_length = np.min([atmosphere.distance_to_boundary(photon_red.position(), dir), photon_red.maximum_optical_depth()/photon_red._scattering_coefficient])
+    atmosphere.deposit_luminosity(photon_red)
+    photon_red.move()
+
     source_function = atmosphere.source_function_integrated()
     from matplotlib import cm, colors
     norm = colors.Normalize(vmin=np.min(source_function), vmax=np.max(source_function))
-    facecolors = cm.rainbow_r(norm(source_function))
+    facecolors = cm.viridis(norm(source_function))
 
     nx, ny, nz = source_function.shape
     cell_size = atmosphere.cell_size()
@@ -107,21 +115,27 @@ def test_plot_sourceFunction():
     X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
     plt.figure()
     ax = plt.axes(projection='3d')
-    ax.voxels(X, Y, Z, source_function, facecolors=facecolors, edgecolor='k', alpha=0.5)
+    ax.voxels(X*1e-3, Y*1e-3, Z*1e-3, source_function, facecolors=facecolors, edgecolor='k', alpha=0.4)
 
 
-    ax.plot(photon.trajectory()[:,0],
-        photon.trajectory()[:,1],
-        photon.trajectory()[:,2],
+    ax.plot(photon_blue.trajectory()[:,0]*1e-3,
+        photon_blue.trajectory()[:,1]*1e-3,
+        photon_blue.trajectory()[:,2]*1e-3,
+        color='b', linewidth=3, label='Ray Path'
+    )
+    ax.plot(photon_red.trajectory()[:,0]*1e-3,
+        photon_red.trajectory()[:,1]*1e-3,
+        photon_red.trajectory()[:,2]*1e-3,
         color='r', linewidth=3, label='Ray Path'
     )
-    ax.set_xlabel('X axis')
-    ax.set_ylabel('Y axis')
-    ax.set_zlabel('Z axis')
-    ax.set_xlim(0, atmosphere.shape()[0] * atmosphere.cell_size())
-    ax.set_ylim(0, atmosphere.shape()[1] * atmosphere.cell_size())
-    ax.set_zlim(0, atmosphere.shape()[2] * atmosphere.cell_size())
-    plt.colorbar(cm.ScalarMappable(norm=norm, cmap='rainbow_r'), ax=ax, shrink=0.5, aspect=5, label='intensity')
+    ax.set_xlabel('[km]')
+    ax.set_ylabel('[km]')
+    ax.set_zlabel('[km]')
+    ax.set_xlim(0, atmosphere.shape()[0] * atmosphere.cell_size()*1e-3)
+    ax.set_ylim(0, atmosphere.shape()[1] * atmosphere.cell_size()*1e-3)
+    ax.set_zlim(0, atmosphere.shape()[2] * atmosphere.cell_size()*1e-3)
+    cbar=plt.colorbar(cm.ScalarMappable( cmap='viridis'), ax=ax, shrink=0.5, aspect=5)
+    cbar.set_label(r'$S_\nu^{\rm norm}$', fontsize=16)
     plt.savefig('./figures/test_plot_sourceFunction.png')
     plt.show()
 
@@ -129,9 +143,9 @@ def test_total_luminosity():
     """Test that the total luminosity does not depend on the photon number"""
     total_deposited=[]
     for i in range(2):
-        star = simulation.Star(direction=(np.pi/1.2, 0))
+        star = simulation.Star(model='Sun',direction=(np.pi/1.2, 0))
         atmosphere = simulation.Atmosphere(shape=(10, 10, 10), cell_size=1e4)
-        sim1 = simulation.Simulation(atmosphere, star, N=10000 * (i +1) )
+        sim1 = simulation.Simulation(atm=atmosphere, star=star, N=10000 * (i +1) )
         sim1.run()
 
         total_deposited.append(np.sum(atmosphere.source_function_integrated()))
