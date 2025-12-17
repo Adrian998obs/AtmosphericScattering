@@ -13,10 +13,11 @@ def direction_in_cartesian(theta, phi):
 
 
 class Atmosphere:
-    def __init__(self, shape = (10,10,10), cell_size=1.0):
+    def __init__(self, shape = (10,10,10), cell_size=1.0, number_density=1.4e24):
         self._shape = shape
         #self._source_function = np.zeros(shape)
         self._albedo = 1.0 # only scattering
+        self._number_density = number_density  # molecules per m^3 (approx at sea level)
         self._cell_size = cell_size 
         self._source_function = np.empty(self._shape, dtype=object)
         for idx in np.ndindex(self._shape):
@@ -185,10 +186,12 @@ class Atmosphere:
         return self._source_function
     def shape(self):
         return self._shape
+    def number_density(self):
+        return self._number_density
 
 class PhotonPacket:
 
-    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 1.4e25, initial_theta=None, initial_phi=None):
+    def __init__(self, position = np.array([0,0,0]), luminosity = 1.0, wavelength = 550e-9, number_density = 1.4e24, initial_theta=None, initial_phi=None):
         self._position = position
         self._lambda = wavelength  # in meters
         self._luminosity = luminosity  # in Watts
@@ -353,7 +356,8 @@ class Star:
     
     def createPhotonPackets(self, initial, N, use_physical_units=True, 
                             area=1.0, dt=1.0,
-                            lam_band_m=(1e-9, 1_000_000.0e-9)):            # 1 nm – 1 mm
+                            lam_band_m=(1e-9, 1_000_000.0e-9), 
+                            number_density=1.4e24):            # 1 nm – 1 mm
         #lam_band_m = (lam_band_nm[0]*1e-9, lam_band_nm[1]*1e-9)
     
         x_samples = self.sample_blackbody_x(N, x_max=20.0, y_max=1.6, lam_band_m=lam_band_m)
@@ -363,8 +367,10 @@ class Star:
         if use_physical_units:
             lam_grid = np.linspace(lam_band_m[0], lam_band_m[1], 5000)
             F = self.irradiance_F_lambda(lam_grid) # W/m²/m spectral flux 
+            
             band_power_per_area = np.trapezoid(F, lam_grid) # W/m² integrated over band
             total_band_energy   = band_power_per_area * area * dt
+            print(f"Total luminosity receuved from star in band (W):{total_band_energy:.3e}, on the surface area (m²): {area:.3e}")
             print(f"Total flux received from star in band {lam_band_m[0]*1e9:.1f}nm-{lam_band_m[1]*1e9:.1f}nm: {band_power_per_area:.1f} W/m²")
             weight = total_band_energy / N
         else:
@@ -376,7 +382,8 @@ class Star:
                              luminosity=weight,
                              wavelength=lam_samples[i],
                              initial_theta= np.pi - self._direction[0],
-                             initial_phi= self._direction[1] + np.pi)
+                             initial_phi= self._direction[1] + np.pi, 
+                             number_density=number_density)
             photons.append(p)
         return photons
 
@@ -502,7 +509,7 @@ class Observer:
 
         return np.sum(length_in_cell, axis = (0,1,2))
     
-    def render(self, projection='fisheye', radius_ratio=1.0, include_star=True, rayleigh_n=1.4e25, use_saved_data=True):
+    def render(self, projection='fisheye', radius_ratio=1.0, include_star=True, use_saved_data=True, file='./data/simulation_output.npz'):
         """
         Render sky with discrete RT along rays.
         Returns numpy array (ny, nx, 3) with channels in order [B, G, R].
@@ -521,10 +528,10 @@ class Observer:
         sigma_prefactor = 4.3e-56
         lam_center = [0.5 * (edges[b] + edges[b+1]) for b in range(self._n_bins)]
         sigma = sigma_prefactor / (np.array(lam_center) ** 4)
-        alpha = sigma * rayleigh_n 
+        alpha = sigma * self.atm.number_density()  # extinction coefficient per bin
         
-        if os.path.exists('./data/simulation_output.npz') and use_saved_data:
-            data = np.load('./data/simulation_output.npz')
+        if os.path.exists(file) and use_saved_data:
+            data = np.load(file, allow_pickle=True)
 
             spectral_source_function = data['spectral_source_function']
         else:
@@ -579,20 +586,6 @@ class Observer:
                         star_spec = np.array([0.125, 0.136, 0.103])
                         L_b = self.star.luminosity() * star_spec  # luminosity per band (W)
 
-                        # pixel solid angle (approx) using camera FOV
-                        dtheta = self.fov_y / self.ny
-                        dphi = self.fov_x / self.nx
-                        theta_pix = np.arccos(np.clip(np.dot(dir_vec, self.forward), -1.0, 1.0))
-                        delta_omega = np.sin(theta_pix) * dtheta * dphi
-
-                        # CORRECTION: fraction of the STAR's solid angle that the pixel covers
-                        # If pixel is smaller than the star: frac = ΔΩ_pixel / Ω_star
-                        # If pixel is larger: frac = 1 (pixel contains whole star disk)
-                        if omega_star <= 0 or delta_omega <= 0:
-                            frac = 0.0
-                        else:
-                            frac = min(1.0, delta_omega / omega_star)
-
                         # add band-by-band: F_b = L_b / (4πD^2), attenuated by atmosphere
                         for b in range(self._n_bins):
                             transmittance_star = np.exp(-alpha[b] * depth)
@@ -623,9 +616,40 @@ class Observer:
                     # Cardinaux (φ)
                     ax.text(cx + R*0.95, cy, 'E (φ=0)', color='w', ha='left', va='center', fontsize=8)
                     ax.text(cx - R*0.95, cy, 'W (φ=±π)', color='w', ha='right', va='center', fontsize=8)
-                    ax.text(cx, cy - R*0.95, 'N (φ=+π/2)', color='w', ha='center', va='top', fontsize=8)
-                    ax.text(cx, cy + R*0.95, 'S (φ=-π/2)', color='w', ha='center', va='bottom', fontsize=8)
-    
+                    ax.text(cx, cy - R*0.95, 'S (φ=-π/2)', color='w', ha='center', va='top', fontsize=8)
+                    ax.text(cx, cy + R*0.95, 'N (φ=+π/2)', color='w', ha='center', va='bottom', fontsize=8)
+    def show_spectrum(self, img, pixelx=None, pixely=None):
+        """Bar chart of spectral intensity at one pixel in W·m⁻²·sr⁻¹·nm⁻¹."""
+        # Choix du pixel (défaut: centre de l'image)
+        if pixelx is None:
+            pixelx = self.nx // 2
+        if pixely is None:
+            pixely = self.ny // 2
+
+        # Attention: img est indexé [j, i, c] = [y, x, channel]
+        spec_band = img[pixely, pixelx, :]  # ordre [B, G, R]
+
+        # Bords des bandes en m → centres et largeurs
+        edges_m = np.asarray(self.spectral_edges, dtype=float)            # shape (4,)
+        widths_m = np.diff(edges_m)                                       # (3,)
+        centers_nm = 0.5 * (edges_m[:-1] + edges_m[1:]) * 1e9
+        widths_nm = widths_m * 1e9
+        # Tracé
+        plt.figure(figsize=(6, 4))
+        colors_bgr = ['#4f81bd', '#9bbb59', '#c0504d']  # B, G, R
+        plt.bar(centers_nm, spec_band, width=widths_nm, color=colors_bgr, alpha=0.9)
+
+        # Marqueurs des bords de bande
+        for e_nm in edges_m * 1e9:
+            plt.axvline(e_nm, color='k', alpha=0.15, lw=1)
+
+        plt.xlabel('Wavelength (nm)')
+        plt.ylabel('Intensity (W·m⁻²·sr⁻¹)')
+        plt.title(f'Pixel spectrum at (x={pixelx}, y={pixely})')
+        plt.tight_layout()
+        plt.savefig(f'./figures/observer_spectrum_{pixelx}_{pixely}.png')
+        plt.show()
+
     def show_truecolor(self, img, projection='pinhole'):
         """Display rendered image as truecolor using spectral sensitivities."""
         # normalize per channel with efficiency
@@ -634,18 +658,18 @@ class Observer:
             rgb[:, :, c] = img[:, :, 2-c] * self.spectral_efficiency[c]
         # clip robuste par canal, puis normalisation
         
-        m = np.percentile(rgb, 99.0)
+        m = np.percentile(rgb, 99.5)
         if m > 0:
             rgb = rgb / m
 
         plt.figure(figsize=(8, 8))
         extent = [-180, 180, 180, 0]
         if projection == 'fisheye':
-            plt.imshow(np.clip(rgb, 0.0, 1.0), interpolation=None)
+            plt.imshow(np.clip(rgb, 0.0, 1.0)** (1.0 / 2.2), interpolation=None)
             ax = plt.gca()
             self.overlay_fisheye_grid(ax, self.nx, self.ny)
         else:
-            plt.imshow(np.clip(rgb, 0.0, 1.0), extent=extent, interpolation=None)
+            plt.imshow(np.clip(rgb, 0.0, 1.0)** (1.0 / 2.2), extent=extent, interpolation=None)
             plt.xlabel('Azimuth φ (degrees)')
             plt.ylabel('Elevation θ (degrees)')
             plt.title('Observer Truecolor Image')
@@ -675,7 +699,8 @@ class Simulation:
         self.photons = self.star.createPhotonPackets(initial, self.N,
                                                      use_physical_units=True,
                                                      area=area, dt=dt,
-                                                     lam_band_m=(self.observer.spectral_edges[0], self.observer.spectral_edges[-1]))
+                                                     lam_band_m=(self.observer.spectral_edges[0], self.observer.spectral_edges[-1]), 
+                                                     number_density=self.atmosphere.number_density())
         print("Number of photon packets created:", len(self.photons))
     def initial_positions(self, N):
         dir = self.star.direction()
@@ -729,72 +754,61 @@ class Simulation:
                 initial =  np.vstack((initial, np.column_stack((x, y, z))))
         return initial, total_area
 
-    def run(self, save_output=False):
-        count=-1
-        tau_grid = [[], [], []]
-        count_blue = -1
-        count_green = -1
-        count_red = -1
-        blue = 0
-        green=0
-        red=0
+    def run(self, save_output=None):
+        count_total = 0
+        events_per_band = [0, 0, 0]      # [B, G, R]
+        photons_per_band = [0, 0, 0]
+
+        E_in = 0
+        E_esc = 0
+        E_dep = 0
+
         for photon in self.photons:
-            if photon.wavelength() > self.observer.spectral_edges[0] and photon.wavelength() < self.observer.spectral_edges[1]:
-                    
-                    blue +=1
-            elif photon.wavelength() > self.observer.spectral_edges[1] and photon.wavelength() < self.observer.spectral_edges[2]:
-                
-                green +=1
-            elif photon.wavelength() > self.observer.spectral_edges[2] and photon.wavelength() < self.observer.spectral_edges[3]:
-                
-                red +=1
+            E_in += photon.luminosity()
+            # Classe la bande une seule fois
+            bidx = np.searchsorted(self.observer.spectral_edges, photon.wavelength()) - 1
+            if bidx < 0 or bidx > 2:
+                bidx = None
+            else:
+                photons_per_band[bidx] += 1
             while photon.luminosity() > photon.luminosity_threshold() and self.atmosphere.in_box(photon.position()):
-                count+=1
+                L0 = photon.luminosity()
                 photon.random_walk()
                 tau, theta, phi = photon.get_random_walk()
-                
                 length = photon.optical_length()
-                self.atmosphere.deposit_luminosity(photon)
-                if self.atmosphere.in_box(photon.position() + direction_in_cartesian(theta, phi) * length):
-                    photon.move()
 
-                    if photon.wavelength() > self.observer.spectral_edges[0] and photon.wavelength() < self.observer.spectral_edges[1]:
-                        tau_grid[0].append(length*photon.scattering_coefficient())
-                        count_blue +=1
-                    elif photon.wavelength() > self.observer.spectral_edges[1] and photon.wavelength() < self.observer.spectral_edges[2]:
-                        tau_grid[1].append(length*photon.scattering_coefficient())
-                        count_green +=1
-                    elif photon.wavelength() > self.observer.spectral_edges[2] and photon.wavelength() < self.observer.spectral_edges[3]:
-                        tau_grid[2].append(length*photon.scattering_coefficient())
-                        count_red +=1
+                # Dépôt (la fonction tronque d'elle-même à la frontière si besoin)
+                self.atmosphere.deposit_luminosity(photon)
+                E_dep += L0 - photon.luminosity()
+                # La fin de pas est-elle à l'intérieur ?
+                end_inside = self.atmosphere.in_box(photon.position() + direction_in_cartesian(theta, phi) * length)
+                if end_inside:
+                    photon.move()                  # un scatter a bien lieu au bout du pas
+                    count_total += 1
+                    if bidx is not None:
+                        events_per_band[bidx] += 1
                 else:
+                    # Dernier segment: pas de scatter, on ne compte pas
                     L = self.atmosphere.distance_to_boundary(photon.position(), direction_in_cartesian(theta, phi))
                     photon.set_optical_length(L)
                     photon.move()
-
-                    if photon.wavelength() > self.observer.spectral_edges[0] and photon.wavelength() < self.observer.spectral_edges[1]:
-                        tau_grid[0].append(length*photon.scattering_coefficient())
-                        count_blue +=1
-                    elif photon.wavelength() > self.observer.spectral_edges[1] and photon.wavelength() < self.observer.spectral_edges[2]:
-                        tau_grid[1].append(length*photon.scattering_coefficient())
-                        count_green +=1
-                    elif photon.wavelength() > self.observer.spectral_edges[2] and photon.wavelength() < self.observer.spectral_edges[3]:
-                        tau_grid[2].append(length*photon.scattering_coefficient())
-                        count_red +=1
-
                     break
-        print("Total interaction events per photon packets:", count / len(self.photons))
-        print("Number of photons per band: Blue:", count_blue/blue, "Green:", count_green/green, "Red:", count_red/red)
-        print("Average optical depth per band:", [np.mean(tau) if tau else 0 for tau in tau_grid])
-        if save_output:
-            np.savez('./data/simulation_output.npz', spectral_source_function=self.atmosphere.spectral_source_function(self.observer.spectral_edges))
+            E_esc += photon.luminosity()
+        print("Total interaction events per photon packets:", count_total / len(self.photons))
+        print("Number of scatter events per bands: Blue:", events_per_band[0]/photons_per_band[0] if photons_per_band[0] > 0 else 0, "Green:", events_per_band[1]/photons_per_band[1] if photons_per_band[1] > 0 else 0, "Red:", events_per_band[2]/photons_per_band[2] if photons_per_band[2] > 0 else 0)
+        print(f"Energy in: {E_in:.3e} Energy escaped: {E_esc:.3e} Energy deposited: {E_dep:.3e}")
+        print(f"Relative energy check: (E_in - E_esc - E_dep)/E_in = {(E_in - E_esc - E_dep)/E_in:.3e}")
+
+
+        if save_output is not None:
+            np.savez(save_output, source_function = self.atmosphere.source_function(),spectral_source_function=self.atmosphere.spectral_source_function(self.observer.spectral_edges))
 
     def plot3D(self, band = None, rays=False, use_saved_data=True):
         if band is None:
             luminosity = self.atmosphere.source_function_integrated()
         else:
-            if use_saved_data and os.path.exists('./data/simulation_output.npz'):
-                data = np.load('./data/simulation_output.npz')
+            if use_saved_data and os.path.exists('./data/simulation_horizon.npz'):
+                data = np.load('./data/simulation_horizon.npz')
                 spectral_source_func= data['spectral_source_function']
             else:
                 spectral_source_func = self.atmosphere.spectral_source_function(self.observer.spectral_edges)
@@ -842,25 +856,223 @@ class Simulation:
         plt.savefig(f'./figures/simulation_output_{band}.png')
         plt.show()
 
-    def observe(self, projection='fisheye', use_saved_data=True):
+    def plot_sourceFunction(self, mode='bands', use_saved_data=True, show_checks=True, n_bins=200):
+        """
+        Affiche la source fonction spectrale à partir des événements par voxel.
+        Modes:
+        - 'events' : nuage de points des événements bruts (W·m⁻²·sr⁻¹, pas de densité spectrale)
+        - 'bands'  : histogramme par bandes R/G/B en unités W·m⁻²·sr⁻¹·nm⁻¹
+        - 'hist'   : histogramme fin en λ (nm) en unités W·m⁻²·sr⁻¹·nm⁻¹
+        - 'fine'   : courbe lissée en λ (nm) en unités W·m⁻²·sr⁻¹·nm⁻¹
+        """
+        # Récupération des événements bruts (lambda, valeur)
+        if os.path.exists('./data/simulation_output.npz') and use_saved_data:
+            data = np.load('./data/simulation_output.npz', allow_pickle=True)
+            src = data['source_function']
+        else:
+            src = self.atmosphere.source_function()  # (nx, ny, nz) avec listes [(lam, val)]
 
-        img = self.observer.render(include_star=True, projection=projection, use_saved_data=use_saved_data)
+        lam_list, val_list = [], []
+        for idx in np.ndindex(src.shape):
+            ev = src[idx]
+            if not ev:
+                continue
+            for lam, val in ev:
+                lam_list.append(lam)  # m
+                val_list.append(val)  # W·m⁻²·sr⁻¹ par événement
+
+        if len(lam_list) == 0:
+            print("No source-function events to plot.")
+            return
+
+        lam = np.asarray(lam_list, dtype=float)
+        vals = np.asarray(val_list, dtype=float)
+        m = np.isfinite(lam) & np.isfinite(vals)
+        lam, vals = lam[m], vals[m]
+
+        plt.figure(figsize=(8, 5))
+
+        # Mode événements: pas de densité spectrale → pas de nm⁻¹
+        if mode == 'events':
+            plt.scatter(lam * 1e9, vals, s=6, alpha=0.25, edgecolors='none')
+            plt.xlabel('Wavelength (nm)')
+            plt.ylabel('Deposited intensity per event (W·m⁻²·sr⁻¹)')
+            plt.title('Source-function events (no binning)')
+            if self.observer.spectral_edges is not None:
+                for e in np.asarray(self.observer.spectral_edges) * 1e9:
+                    plt.axvline(e, color='k', alpha=0.1, lw=1)
+            plt.tight_layout()
+            plt.savefig('./figures/source_function_events.png')
+            plt.show()
+            return
+
+        # Bandes: densité spectrale en nm⁻¹
+        if mode == 'bands':
+            edges = np.asarray(self.observer.spectral_edges, dtype=float)  # m
+            totals, _ = np.histogram(lam, bins=edges, weights=vals)        # W·m⁻²·sr⁻¹ par bande
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            widths_m = np.diff(edges)
+            spectral_vals_nm = (totals / widths_m) * 1e-9                  # W·m⁻²·sr⁻¹·nm⁻¹
+
+            if show_checks:
+                widths_nm = widths_m * 1e9
+                sum_raw = vals.sum()
+                sum_rebinned = (spectral_vals_nm * widths_nm).sum()
+                rel_err = 0.0 if sum_raw == 0 else abs(sum_rebinned - sum_raw) / sum_raw
+                print(f"[bands] energy check: raw={sum_raw:.3e}, rebinned={sum_rebinned:.3e}, rel_err={rel_err:.3e}")
+
+            plt.bar(centers * 1e9, spectral_vals_nm, width=widths_m * 1e9,
+                    align='center', color=['#4f81bd', '#9bbb59', '#c0504d'])
+            plt.xlabel('Wavelength (nm)')
+            plt.ylabel('Spectral intensity (W·m⁻²·sr⁻¹·nm⁻¹)')
+            plt.title('Spectral source function (bands, nm⁻¹)')
+            plt.tight_layout()
+            plt.savefig('./figures/source_function_bands_nm.png')
+            plt.show()
+            return
+
+        # Histogramme par bandes: valeurs par voxel (nm⁻¹), agrégées (moyenne) au lieu de la somme globale
+        if mode == 'hist':
+            edges = np.asarray(self.observer.spectral_edges, dtype=float)   # m, len=4
+            widths_m = np.diff(edges)                                       # (3,) bande widths
+            spectral = self.atmosphere.spectral_source_function(edges)      # (nx, ny, nz, 3), W·m⁻²·sr⁻¹ par bande et voxel
+
+            # Convertir en W·m⁻²·sr⁻¹·nm⁻¹ par voxel et par bande
+            S_nm = spectral / widths_m                                      # broadcast on last axis (3)
+            S_nm = S_nm * 1e-9                                              # m⁻¹ → nm⁻¹
+
+            # Aplatir tous les voxels
+            flat = S_nm.reshape(-1, S_nm.shape[-1])                         # (Nvox, 3)
+
+            # Statistiques robustes par bande
+            mean_vals = np.nanmean(flat, axis=0)
+            p10 = np.nanpercentile(flat, 10, axis=0)
+            p90 = np.nanpercentile(flat, 90, axis=0)
+
+            centers_nm = 0.5 * (edges[:-1] + edges[1:]) * 1e9
+            widths_nm = widths_m * 1e9
+
+            plt.bar(centers_nm, mean_vals, width=widths_nm,
+                    color=['#4f81bd', '#9bbb59', '#c0504d'], alpha=0.85, label='Mean per voxel')
+
+            # Barres d'erreur (10–90 percentile) pour visualiser la dispersion
+            yerr = np.vstack((mean_vals - p10, p90 - mean_vals))
+            plt.errorbar(centers_nm, mean_vals, yerr=yerr, fmt='none', ecolor='k', alpha=0.5, capsize=3)
+
+            plt.xlabel('Wavelength (nm)')
+            plt.ylabel('Spectral intensity per voxel (W·m⁻²·sr⁻¹·nm⁻¹)')
+            plt.title('Spectral source function (per-voxel mean, nm⁻¹)')
+            plt.tight_layout()
+            plt.savefig('./figures/source_function_hist_vox_nm.png')
+            plt.show()
+            return
+
+        # Courbe fine en λ: nm⁻¹ (line plot)
+        if mode == 'fine':
+            lam_min = max(lam.min(), 300e-9)
+            lam_max = min(lam.max(), 800e-9)
+            edges = np.linspace(lam_min, lam_max, n_bins + 1)              # m
+            totals, _ = np.histogram(lam, bins=edges, weights=vals)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            widths_m = np.diff(edges)
+            spectral_vals_nm = (totals / widths_m) * 1e-9                  # W·m⁻²·sr⁻¹·nm⁻¹
+            widths_nm = widths_m * 1e9
+
+            if show_checks:
+                sum_raw = vals.sum()
+                sum_rebinned = (spectral_vals_nm * widths_nm).sum()
+                rel_err = 0.0 if sum_raw == 0 else abs(sum_rebinned - sum_raw) / sum_raw
+                print(f"[fine] energy check: raw={sum_raw:.3e}, rebinned={sum_rebinned:.3e}, rel_err={rel_err:.3e}")
+
+            plt.plot(centers * 1e9, spectral_vals_nm, lw=1.8)
+            plt.xlabel('Wavelength (nm)')
+            plt.ylabel('Spectral intensity (W·m⁻²·sr⁻¹·nm⁻¹)')
+            plt.title('Spectral source function (fine, nm⁻¹)')
+            if self.observer.spectral_edges is not None:
+                for e in np.asarray(self.observer.spectral_edges) * 1e9:
+                    plt.axvline(e, color='k', alpha=0.1, lw=1)
+            plt.tight_layout()
+            plt.savefig('./figures/source_function_fine_nm.png')
+            plt.show()
+            return
+
+        raise ValueError("mode must be one of: 'events', 'bands', 'hist', 'fine'")
+    
+    def print_sourceFunction_stats(self, use_saved_data=True, file='./data/simulation_output.npz'):
+        if os.path.exists(file) and use_saved_data:
+            data = np.load(file, allow_pickle=True)
+            src = data['source_function']
+        else:
+            src = self.atmosphere.source_function()  # (nx, ny, nz) avec listes [(lam, val)]
+
+        cell_intensities = []
+        cell_intensities_per_band = [[], [], []]  # B, G, R
+        for idx in np.ndindex(src.shape):
+            cell_I = 0.0
+            cell_blue = 0
+            cell_grn = 0
+            cell_red = 0
+            ev = src[idx]
+            if not ev:
+                continue
+            for lam, val in ev:
+                if 380e-9 <= lam < 495e-9:
+                    cell_blue += val
+                    
+                elif 495e-9 <= lam < 570e-9:
+                    cell_grn += val
+                    
+                elif 570e-9 <= lam < 700e-9:
+                    cell_red += val
+                    
+                cell_I += val
+
+            cell_intensities_per_band[0].append(cell_blue)
+            cell_intensities_per_band[1].append(cell_grn)
+            cell_intensities_per_band[2].append(cell_red)
+            
+            cell_intensities.append(cell_I)
+        intensity_tot= np.sum(cell_intensities)
+        luminosity_tot= intensity_tot * (self.atmosphere.cell_size()** 2 * self.atmosphere.shape()[0] * self.atmosphere.shape()[1]) * 4.0 * np.pi
+        print(f"Total luminosity deposited in atmosphere: {luminosity_tot:.3e} W")
+
+        print("Source-function statistics:")
+        print(f"  Total deposited intensity: {np.sum(cell_intensities):.3e} W·m⁻²·sr⁻¹")
+        print(f"Mean intensity per cell: {np.mean(cell_intensities):.3e} W·m⁻²·sr⁻¹")
+        print(f" Median intensity per cell: {np.median(cell_intensities):.3e} W·m⁻²·sr⁻¹")
+        print(f"  Intensity std. dev.: {np.std(cell_intensities):.3e} W·m⁻²·sr⁻¹")
+        bands = ['Blue', 'Green', 'Red']
+        for b in range(3):  
+            band_vals = cell_intensities_per_band[b]
+            if len(band_vals) == 0:
+                continue
+            print(f" {bands[b]} band:")
+            print(f"  Total deposited intensity: {np.sum(band_vals):.3e} W·m⁻²·sr⁻¹")
+            print(f" Mean intensity per cell: {np.mean(band_vals):.3e} W·m⁻²·sr⁻¹")
+            print(f" Median intensity per cell: {np.median(band_vals):.3e} W·m⁻²·sr⁻¹")
+            print(f"  Intensity std. dev.: {np.std(band_vals):.3e} W·m⁻²·sr⁻¹")
+
+    def observe(self, projection='fisheye', use_saved_data=True, file='./data/simulation_output.npz'):
+
+        img = self.observer.render(include_star=True, projection=projection, use_saved_data=use_saved_data, file=file)
 
         self.observer.show_truecolor(img, projection=projection)
+        self.observer.show_spectrum(img, pixelx=image_size[0]-5, pixely=image_size[1]//2)
+        self.observer.show_spectrum(img, pixelx=5, pixely=image_size[1]//2)
 
 
 if __name__ == "__main__":
-    boxsize = (50, 50, 15) # in number of cells
+    boxsize = (100, 100, 15) # in number of cells
     cell_size = 1e4 # in meters: 10 km
 
-    N = 100_000 # number of photon packets
-    star = Star(model='Sun', direction=(np.pi/2.1, np.pi/1.1)) #direction: theta, phi
-    atm = Atmosphere(shape = boxsize, cell_size=cell_size)
+    N = 1_000_000 # number of photon packets
+    star = Star(model='Sun', direction=(np.pi/2, np.pi)) #direction: theta, phi
+    atm = Atmosphere(shape = boxsize, cell_size=cell_size, number_density=1.3e24)  # number density in m^-3
     
     obs_pos = [(atm.shape()[0] * atm.cell_size())/2, 
                    (atm.shape()[1] * atm.cell_size())/2,
                    0]
-    image_size = (280, 280)
+    image_size = (480, 480)
     spectral_edges = [380e-9, 495e-9, 570e-9, 700e-9]  # visible spectrum in meters
     spectral_efficiency = [0.7, 1.0, 0.5]  # R, G, B sensitivities
     observer = Observer( atm, star, 
@@ -870,14 +1082,17 @@ if __name__ == "__main__":
                         spectral_edges=spectral_edges)
 
     sim = Simulation(atm=atm, star=star, obs=observer, N=N)
-    sim.run(save_output=False)
-    sim.plot3D(use_saved_data=False)
-
+    output_file = './data/simulation_horizon.npz'
+    sim.run(save_output=output_file)
+    #sim.plot3D(use_saved_data=False)
+    #sim.plot_sourceFunction(use_saved_data=True, mode='bands')
+    #sim.plot_sourceFunction(use_saved_data=True, mode='hist')
+    #sim.print_sourceFunction_stats(use_saved_data=True, file = output_file)
     """ sim.plot(band='blue')
     sim.plot(band='green')
     sim.plot(band='red') """
 
-    sim.observe(projection='fisheye', use_saved_data=False)
+    sim.observe(projection='fisheye', use_saved_data=False, file = output_file)
 
     
 

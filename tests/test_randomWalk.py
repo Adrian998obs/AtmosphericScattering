@@ -8,20 +8,38 @@ import simulation
 
 def test_RW():
     """Test the random walk simulation of photon packets in the atmosphere."""
-    atmosphere = simulation.Atmosphere()
-    photon = simulation.PhotonPacket(position=np.array([5,5,5]))
-    while atmosphere.in_box(photon.position()):
-        photon.random_walk()
-        photon.move()
+    atmosphere = simulation.Atmosphere(shape=(100,100,100), cell_size=1e4, number_density=1.4e24)
+    blue_photon = simulation.PhotonPacket(position=np.array([atmosphere.shape()[0]/2 * atmosphere.cell_size(),
+                                                       atmosphere.shape()[1]/2 * atmosphere.cell_size(),
+                                                       atmosphere.shape()[2]/2 * atmosphere.cell_size()]), 
+                                                       wavelength=400e-9, 
+                                                       number_density=atmosphere.number_density())
+    while atmosphere.in_box(blue_photon.position()):
+        blue_photon.random_walk()
+        blue_photon.move()
+    
+    red_photon = simulation.PhotonPacket(position=np.array([atmosphere.shape()[0]/2 * atmosphere.cell_size(),
+                                                       atmosphere.shape()[1]/2 * atmosphere.cell_size(),
+                                                       atmosphere.shape()[2]/2 * atmosphere.cell_size()]), 
+                                                       wavelength=700e-9, 
+                                                       number_density=atmosphere.number_density())
+    while atmosphere.in_box(red_photon.position()):
+        red_photon.random_walk()
+        red_photon.move()
 
     cell_size = atmosphere.cell_size()
 
     plt.figure()
     ax = plt.axes(projection='3d')
-    ax.plot(photon.trajectory()[:,0],
-        photon.trajectory()[:,1],
-        photon.trajectory()[:,2],
-        color='r', linewidth=2, label='Photon Path'
+    ax.plot(blue_photon.trajectory()[:,0],
+        blue_photon.trajectory()[:,1],
+        blue_photon.trajectory()[:,2],
+        color='b', linewidth=2, label='Blue Photon Path'
+    )
+    ax.plot(red_photon.trajectory()[:,0],
+        red_photon.trajectory()[:,1],
+        red_photon.trajectory()[:,2],
+        color='r', linewidth=2, label='Red Photon Path'
     )
     ax.set_xlabel('X axis')
     ax.set_ylabel('Y axis')
@@ -35,9 +53,9 @@ def test_RW():
 def test_mfp():
     """Test the mean free path calculation and luminosity deposition."""
     lengths = np.array([])
-    N = 10000
+    N = 100000
     for _ in range(N):
-        photon = simulation.PhotonPacket(position=np.array([0,0,5.5]), wavelength=400e-9)
+        photon = simulation.PhotonPacket(position=np.array([0,0,5.5]), wavelength=380e-9, number_density=1.4e24)
         photon.random_walk()
         length = photon.optical_length()
         lengths = np.append(lengths, length)

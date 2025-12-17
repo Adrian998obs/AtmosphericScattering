@@ -69,12 +69,15 @@ def test_star_spectrum():
 
 def test_total_luminosity():
     star = simulation.Star(model='Sun')
-    luminosity_received = star.luminosity() / (4 * np.pi * star.D**2) 
-    N_photons = 100000
-    photons = star.createPhotonPackets([0,0,0]*N_photons,N_photons, lam_band_nm=(1,1e5), use_physical_units=True, area=1.0, dt=1.0)
+    lam_grid = np.linspace(380e-9, 700e-9, 5000)
+    F = star.irradiance_F_lambda(lam_grid) # W/m²/m spectral flux 
+    band_power_per_area = np.trapezoid(F, lam_grid) # W/m² integrated over band
 
-    total_energy = np.sum([photon.luminosity() for photon in photons])
-    assert np.isclose(total_energy, luminosity_received, rtol=1e-2), f"Total photon luminosity {total_energy} does not match star luminosity {luminosity_received}"
+    N_photons = 1_000_000
+    photons = star.createPhotonPackets([0,0,0]*N_photons,N_photons, lam_band_m=(380e-9,700e-9), use_physical_units=True, area=1.0, dt=1.0)
+
+    total_flux_received = np.sum([photon.luminosity() for photon in photons])
+    assert np.isclose(total_flux_received, band_power_per_area, rtol=1e-2), f"Total photon luminosity {total_flux_received} does not match star luminosity {band_power_per_area}"
     
 if __name__ == "__main__":
     test_star_luminosity()
